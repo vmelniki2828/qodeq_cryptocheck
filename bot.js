@@ -257,19 +257,46 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
       return;
     }
 
-    const wallets = await Wallet.find().sort({ createdAt: -1 });
+    const allWallets = await Wallet.find().sort({ createdAt: -1 });
 
-    if (wallets.length === 0) {
+    if (allWallets.length === 0) {
       await bot.sendMessage(chatId, '📭 В базе данных пока нет кошельков.\n\nИспользуйте /addwallet для добавления.');
       return;
     }
 
+    // Фильтруем кошельки с балансом больше $100
+    const MIN_BALANCE = 100;
+    const walletsWithBalance = [];
+    
+    for (const wallet of allWallets) {
+      // Получаем последнюю запись из истории для баланса
+      const lastHistory = await BalanceHistory.findOne({ wallet_id: wallet._id })
+        .sort({ checkedAt: -1 });
+      
+      let currentBalance = 0;
+      if (lastHistory && lastHistory.balance) {
+        currentBalance = lastHistory.balance;
+      } else if (wallet.balance !== null && wallet.balance !== undefined) {
+        currentBalance = wallet.balance;
+      }
+      
+      // Добавляем только кошельки с балансом больше $100
+      if (currentBalance > MIN_BALANCE) {
+        walletsWithBalance.push(wallet);
+      }
+    }
+
+    if (walletsWithBalance.length === 0) {
+      await bot.sendMessage(chatId, '📭 Нет кошельков с балансом больше $100.');
+      return;
+    }
+
     const WALLETS_PER_PAGE = 10;
-    const totalPages = Math.ceil(wallets.length / WALLETS_PER_PAGE);
+    const totalPages = Math.ceil(walletsWithBalance.length / WALLETS_PER_PAGE);
     const currentPage = Math.max(0, Math.min(page, totalPages - 1));
     const startIndex = currentPage * WALLETS_PER_PAGE;
-    const endIndex = Math.min(startIndex + WALLETS_PER_PAGE, wallets.length);
-    const walletsOnPage = wallets.slice(startIndex, endIndex);
+    const endIndex = Math.min(startIndex + WALLETS_PER_PAGE, walletsWithBalance.length);
+    const walletsOnPage = walletsWithBalance.slice(startIndex, endIndex);
 
     // Вычисляем время до следующей проверки
     const timeUntilNext = getTimeUntilNextCheck();
@@ -277,7 +304,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
     // Собираем все времена последней проверки для определения самого последнего
     let allLastCheckTimes = [];
     
-    let message = `💼 Все кошельки (${wallets.length}):\n`;
+    let message = `💼 Кошельки с балансом > $100 (${walletsWithBalance.length}):\n`;
     message += `📄 Страница ${currentPage + 1} из ${totalPages}\n\n`;
     
     for (let i = 0; i < walletsOnPage.length; i++) {
@@ -343,8 +370,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
         balanceStr = `💰 Баланс: не проверен\n`;
       }
       
-      message += `${globalIndex + 1}. 🆔 ${wallet._id}\n`;
-      message += `   📁 Проект: ${wallet.project}\n`;
+      message += `${globalIndex + 1}. 📁 Проект: ${wallet.project}\n`;
       message += `   👤 User ID: ${wallet.user_id}\n`;
       message += `   🏷️ Тип: ${wallet.type || 'не указан'}\n`;
       message += `   📝 Алиас: ${wallet.alias || 'не указан'}\n`;
@@ -354,7 +380,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
       if (changeStr) {
         message += `   ${changeStr}`;
       }
-      message += `   📅 ${new Date(wallet.createdAt).toLocaleDateString('ru-RU')}\n\n`;
+      message += `\n`;
     }
     
     // Находим самое последнее время проверки
