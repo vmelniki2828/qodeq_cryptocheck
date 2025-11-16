@@ -264,25 +264,61 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
       return;
     }
 
-    // Фильтруем кошельки с балансом больше $100
+    // Оптимизация: получаем все последние балансы одним запросом через агрегацию
     const MIN_BALANCE = 100;
+    const walletIds = allWallets.map(w => w._id);
+    
+    // Получаем последние балансы для всех кошельков одним запросом
+    const lastBalances = await BalanceHistory.aggregate([
+      { $match: { wallet_id: { $in: walletIds } } },
+      { $sort: { checkedAt: -1 } },
+      {
+        $group: {
+          _id: '$wallet_id',
+          balance: { $first: '$balance' },
+          previousBalance: { $first: '$previousBalance' },
+          checkedAt: { $first: '$checkedAt' }
+        }
+      }
+    ]);
+    
+    // Создаем Map для быстрого доступа к балансам
+    const balanceMap = new Map();
+    lastBalances.forEach(item => {
+      balanceMap.set(item._id.toString(), {
+        balance: item.balance || 0,
+        previousBalance: item.previousBalance,
+        checkedAt: item.checkedAt
+      });
+    });
+    
+    // Фильтруем кошельки с балансом больше $100
     const walletsWithBalance = [];
+    const walletBalanceData = new Map(); // Сохраняем данные балансов для использования на странице
     
     for (const wallet of allWallets) {
-      // Получаем последнюю запись из истории для баланса
-      const lastHistory = await BalanceHistory.findOne({ wallet_id: wallet._id })
-        .sort({ checkedAt: -1 });
+      const walletIdStr = wallet._id.toString();
+      const balanceData = balanceMap.get(walletIdStr);
       
       let currentBalance = 0;
-      if (lastHistory && lastHistory.balance) {
-        currentBalance = lastHistory.balance;
+      let lastCheckTime = null;
+      
+      if (balanceData && balanceData.balance) {
+        currentBalance = balanceData.balance;
+        lastCheckTime = balanceData.checkedAt;
       } else if (wallet.balance !== null && wallet.balance !== undefined) {
         currentBalance = wallet.balance;
+        lastCheckTime = wallet.lastBalanceCheck;
       }
       
       // Добавляем только кошельки с балансом больше $100
       if (currentBalance > MIN_BALANCE) {
         walletsWithBalance.push(wallet);
+        walletBalanceData.set(walletIdStr, {
+          balance: currentBalance,
+          previousBalance: balanceData?.previousBalance || null,
+          checkedAt: lastCheckTime
+        });
       }
     }
 
@@ -310,46 +346,23 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
     for (let i = 0; i < walletsOnPage.length; i++) {
       const wallet = walletsOnPage[i];
       const globalIndex = startIndex + i;
-      
-      // Получаем последнюю запись из истории для баланса
-      const lastHistory = await BalanceHistory.findOne({ wallet_id: wallet._id })
-        .sort({ checkedAt: -1 });
-      
-      // Получаем предыдущую запись из истории для сравнения
-      const previousHistory = await BalanceHistory.find({ wallet_id: wallet._id })
-        .sort({ checkedAt: -1 })
-        .limit(2);
+      const walletIdStr = wallet._id.toString();
+      const balanceData = walletBalanceData.get(walletIdStr);
       
       let balanceStr = '';
       let changeStr = '';
       
-      // Определяем время последней проверки из любого доступного источника
-      let lastCheckTime = null;
-      if (lastHistory && lastHistory.checkedAt) {
-        lastCheckTime = lastHistory.checkedAt;
-      } else if (wallet.lastBalanceCheck) {
-        lastCheckTime = wallet.lastBalanceCheck;
-      }
-      
-      // Сохраняем время для общего блока
-      if (lastCheckTime) {
-        allLastCheckTimes.push(new Date(lastCheckTime));
-      }
-      
-      if (lastHistory && lastHistory.balance) {
-        // Используем сохраненный баланс в USD из истории
-        const currentBalance = lastHistory.balance;
+      if (balanceData && balanceData.balance) {
+        const currentBalance = balanceData.balance;
         balanceStr = `💰 Баланс: $${formatNumberWithCommas(currentBalance)}\n`;
         
-        // Вычисляем изменение баланса
-        let previousBalance = null;
-        if (lastHistory.previousBalance !== null && lastHistory.previousBalance !== undefined) {
-          // Используем сохраненный previousBalance из истории
-          previousBalance = lastHistory.previousBalance;
-        } else if (previousHistory.length > 1) {
-          // Если previousBalance не сохранен, берем из предыдущей записи
-          previousBalance = previousHistory[1].balance;
+        // Сохраняем время для общего блока
+        if (balanceData.checkedAt) {
+          allLastCheckTimes.push(new Date(balanceData.checkedAt));
         }
+        
+        // Вычисляем изменение баланса
+        const previousBalance = balanceData.previousBalance;
         
         if (previousBalance !== null && previousBalance !== undefined && previousBalance > 0) {
           const difference = currentBalance - previousBalance;
@@ -360,12 +373,14 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
           const formattedDiff = formatLargeNumber(difference);
           
           changeStr = `📊 Изменение: ${diffSign}$${formattedDiff} (${percentSign}${percentChange.toFixed(2)}%)\n`;
-        } else if (previousBalance === 0 || previousBalance === null) {
+        } else {
           changeStr = `📊 Первая проверка баланса\n`;
         }
       } else if (wallet.balance !== null && wallet.balance !== undefined) {
-        // Если истории нет, но есть баланс в кошельке (уже в USD)
         balanceStr = `💰 Баланс: $${formatNumberWithCommas(wallet.balance)}\n`;
+        if (wallet.lastBalanceCheck) {
+          allLastCheckTimes.push(new Date(wallet.lastBalanceCheck));
+        }
       } else {
         balanceStr = `💰 Баланс: не проверен\n`;
       }
