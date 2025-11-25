@@ -368,11 +368,15 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
           const difference = currentBalance - previousBalance;
           const percentChange = (difference / previousBalance) * 100;
           
-          const diffSign = difference >= 0 ? '+' : '';
-          const percentSign = percentChange >= 0 ? '+' : '';
-          const formattedDiff = formatLargeNumber(difference);
-          
-          changeStr = `📊 Изменение: ${diffSign}$${formattedDiff} (${percentSign}${percentChange.toFixed(2)}%)\n`;
+          // Показываем изменения только если они положительные или нулевые
+          if (difference >= 0) {
+            const diffSign = difference > 0 ? '+' : '';
+            const percentSign = percentChange > 0 ? '+' : '';
+            const formattedDiff = formatLargeNumber(difference);
+            
+            changeStr = `📊 Изменение: ${diffSign}$${formattedDiff} (${percentSign}${percentChange.toFixed(2)}%)\n`;
+          }
+          // Если изменение отрицательное - не показываем
         } else {
           changeStr = `📊 Первая проверка баланса\n`;
         }
