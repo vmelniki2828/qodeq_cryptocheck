@@ -33,9 +33,15 @@ export const connectDB = async () => {
       console.error('   4. Или используйте MongoDB Atlas (облачный сервис)');
       console.error('\n📖 Инструкция по установке MongoDB:');
       console.error('   https://www.mongodb.com/docs/manual/installation/');
-    } else if (error.message.includes('authentication failed')) {
+    } else if (error.message.includes('authentication failed') || error.message.includes('requires authentication') || error.code === 13) {
       console.error('🔴 Ошибка аутентификации!');
-      console.error('   Проверьте правильность username и password в MONGODB_URI');
+      console.error('   MongoDB требует аутентификацию, но учетные данные не указаны или неверны');
+      console.error('\n💡 Решение:');
+      console.error('   1. Проверьте файл .env');
+      console.error('   2. Убедитесь, что MONGODB_URI содержит username и password:');
+      console.error('      mongodb://username:password@localhost:27017/cryptocheck?authSource=cryptocheck');
+      console.error('   3. Если в пароле есть спецсимволы (!, @, #), закодируйте их в URL:');
+      console.error('      ! → %21, @ → %40, # → %23');
     } else if (error.message.includes('ENOTFOUND')) {
       console.error('🔴 Хост MongoDB не найден!');
       console.error('   Проверьте правильность адреса в MONGODB_URI');
