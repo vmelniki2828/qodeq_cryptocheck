@@ -2,13 +2,18 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cron from 'node-cron';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { connectDB } from './config/database.js';
 import { Wallet } from './models/Wallet.js';
 import { BalanceHistory } from './models/BalanceHistory.js';
 import { checkBalance, formatBalance, formatBalanceUSD, convertToUSD } from './services/balanceChecker.js';
 
 // Загрузка переменных окружения
-dotenv.config();
+// В ESM `dotenv.config()` без path берет .env из process.cwd().
+// PM2 может запускать процесс не из корня проекта, поэтому указываем путь явно.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 // Проверка наличия токена
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;

@@ -1,7 +1,12 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+// В ESM `dotenv.config()` без path берет .env из process.cwd().
+// PM2 может запускать процесс не из корня проекта, поэтому указываем путь явно.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/cryptocheck';
 
