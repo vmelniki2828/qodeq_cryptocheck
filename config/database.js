@@ -13,9 +13,17 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/crypto
 export const connectDB = async () => {
   try {
     console.log('🔄 Попытка подключения к MongoDB...');
-    console.log(`📍 URI: ${MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@')}`); // Скрываем пароль в логах
+    // Иногда env может случайно прийти как "MONGODB_URI=mongodb://..." (с ключом внутри).
+    // Тогда соединительная строка ломается ("Invalid scheme"). Нормализуем.
+    const normalizedMongodbUri = MONGODB_URI.startsWith('MONGODB_URI=')
+      ? MONGODB_URI.slice('MONGODB_URI='.length)
+      : MONGODB_URI;
+
+    console.log(
+      `📍 URI: ${normalizedMongodbUri.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@')}`
+    ); // Скрываем пароль в логах
     
-    await mongoose.connect(MONGODB_URI, {
+    await mongoose.connect(normalizedMongodbUri, {
       serverSelectionTimeoutMS: 5000, // Таймаут 5 секунд
       socketTimeoutMS: 45000,
     });
