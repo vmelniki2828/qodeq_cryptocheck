@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { connectDB } from './config/database.js';
 import { Wallet } from './models/Wallet.js';
 import { BalanceHistory } from './models/BalanceHistory.js';
+import { BotSubscriber } from './models/BotSubscriber.js';
 import { checkBalance, formatBalance, formatBalanceUSD, convertToUSD } from './services/balanceChecker.js';
 
 // Загрузка переменных окружения
@@ -144,9 +145,33 @@ const getTimeUntilNextCheck = () => {
   };
 };
 
+/** Сохраняет chat_id для рассылки после автопроверки (всем, кто пользовался ботом). */
+const registerBotSubscriber = async (msg) => {
+  if (mongoose.connection.readyState !== 1) return;
+  try {
+    const chatId = msg.chat.id;
+    const from = msg.from;
+    await BotSubscriber.findOneAndUpdate(
+      { chatId },
+      {
+        $set: {
+          chatType: msg.chat.type || 'private',
+          username: from?.username || '',
+          firstName: from?.first_name || '',
+          lastActiveAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error('❌ registerBotSubscriber:', e.message || e);
+  }
+};
+
 // Обработка команды /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
 
   await bot.sendMessage(
     chatId,
@@ -160,6 +185,7 @@ bot.onText(/\/start/, async (msg) => {
 bot.onText(/\/addwallet/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+  await registerBotSubscriber(msg);
 
   if (mongoose.connection.readyState !== 1) {
     await bot.sendMessage(chatId, '⚠️ База данных недоступна. Проверьте подключение к MongoDB.');
@@ -468,6 +494,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
 // Обработка команды /wallets - просмотр всех кошельков
 bot.onText(/\/wallets/, async (msg) => {
   const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
   await showWalletsPage(chatId, 0);
 });
 
@@ -615,6 +642,7 @@ const checkAllWalletsBalance = async () => {
 // Обработка команды /checkbalance - проверка балансов всех кошельков
 bot.onText(/\/checkbalance/, async (msg) => {
   const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
 
   try {
     if (mongoose.connection.readyState !== 1) {
@@ -688,6 +716,37 @@ const performAutomaticBalanceCheck = async () => {
       console.log(`📊 Первая проверка Net Assets`);
     }
     console.log('');
+
+    // После плановой проверки (6:00 / 15:00 МСК) — разослать всем, кто хоть раз писал боту (/start, /wallets, …)
+    const subscribers = await BotSubscriber.find({}).lean();
+    if (subscribers.length === 0) {
+      console.log('📭 Нет подписчиков для авто-/wallets (никто ещё не писал боту при работающей БД).');
+    } else {
+      const intro =
+        `⏰ Автопроверка балансов завершена (${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК).\n` +
+        `📋 Список кошельков (как /wallets):`;
+      let ok = 0;
+      for (const sub of subscribers) {
+        try {
+          await bot.sendMessage(sub.chatId, intro);
+          await showWalletsPage(sub.chatId, 0);
+          ok++;
+        } catch (sendErr) {
+          const code =
+            sendErr.response?.body?.error_code ??
+            sendErr.response?.statusCode ??
+            sendErr.code;
+          if (code === 403) {
+            await BotSubscriber.deleteOne({ chatId: sub.chatId }).catch(() => {});
+            console.log(`🗑️ Чат ${sub.chatId} удалён из рассылки (бот заблокирован или исключён).`);
+          } else {
+            console.error(`❌ Авто-/wallets для chat ${sub.chatId}:`, sendErr.message || sendErr);
+          }
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      console.log(`📤 Авто-/wallets: отправлено ${ok} из ${subscribers.length} чат(ов).`);
+    }
   } catch (error) {
     console.error('❌ Ошибка при автоматической проверке балансов:', error);
   }
