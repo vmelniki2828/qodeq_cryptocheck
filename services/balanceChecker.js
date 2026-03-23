@@ -106,98 +106,51 @@ const getAllTRC20TokensFromTronScan = async (address) => {
 };
 
 /**
- * Проверка баланса TRON кошелька через TronGrid API
+ * Проверка баланса TRON кошелька через TronScan API
  */
 export const checkTronBalance = async (address) => {
   try {
-    // TronGrid API endpoint
-    const apiUrl = `https://api.trongrid.io/v1/accounts/${address}`;
-    
-    const response = await fetch(apiUrl, {
+    // Основной источник данных: TronScan
+    const accountResponse = await fetch(`https://apilist.tronscan.org/api/account?address=${address}`, {
       method: 'GET',
       headers: {
-        'Accept': 'application/json',
-        'TRON-PRO-API-KEY': process.env.TRONGRID_API_KEY || '' // Опциональный API ключ
+        'Accept': 'application/json'
       }
     });
 
-    if (!response.ok) {
-      throw new Error(`TronGrid API error: ${response.status} ${response.statusText}`);
+    if (!accountResponse.ok) {
+      throw new Error(`TronScan API error: ${accountResponse.status} ${accountResponse.statusText}`);
     }
 
-    const data = await response.json();
-    
-    if (!data.data || data.data.length === 0) {
+    const accountData = await accountResponse.json();
+    if (!accountData) {
       return {
         success: false,
         error: 'Кошелек не найден или адрес неверный'
       };
     }
 
-    const account = data.data[0];
-    
-    // Баланс TRX (в sun, нужно конвертировать в TRX: 1 TRX = 1,000,000 sun)
-    const balanceTRX = account.balance ? account.balance / 1000000 : 0;
-    
-    // Получаем все TRC20 токены из TronGrid
-    const tokensFromTronGrid = [];
-    if (account.trc20 && Array.isArray(account.trc20)) {
-      account.trc20.forEach(token => {
-        try {
-          const decimals = token.token_info?.decimals || 6;
-          const balance = parseInt(token.balance || '0') / Math.pow(10, decimals);
-          
-          if (balance > 0) {
-            tokensFromTronGrid.push({
-              contract_address: token.contract_address,
-              symbol: token.token_info?.symbol || 'UNKNOWN',
-              name: token.token_info?.name || 'Unknown Token',
-              balance: balance,
-              decimals: decimals
-            });
-          }
-        } catch (error) {
-          console.error(`Ошибка при обработке токена ${token.contract_address}:`, error);
-        }
-      });
-    }
-    
-    // Пытаемся получить все токены из TronScan (более полный список, включая SC)
+    // Баланс TRX: TronScan обычно отдает в SUN в поле balance
+    const rawTrxBalance =
+      accountData.balance ??
+      accountData.trxBalance ??
+      accountData.trx_balance ??
+      accountData.amount ??
+      0;
+    const balanceTRX = Number(rawTrxBalance) > 0 ? Number(rawTrxBalance) / 1_000_000 : 0;
+
+    // Все TRC20 токены берем через TronScan (несколько endpoint внутри helper)
     const tokensFromTronScan = await getAllTRC20TokensFromTronScan(address);
-    
-    // Объединяем токены из обоих источников, убирая дубликаты
-    const allTokens = [];
-    const seenAddresses = new Set();
-    
-    // Сначала добавляем токены из TronScan (более полный список, включает токены от SC)
-    if (tokensFromTronScan && tokensFromTronScan.length > 0) {
-      tokensFromTronScan.forEach(token => {
-        if (!seenAddresses.has(token.contract_address)) {
-          seenAddresses.add(token.contract_address);
-          allTokens.push({
-            ...token,
-            source: token.source || 'TronScan'
-          });
-        }
-      });
-    }
-    
-    // Затем добавляем токены из TronGrid, которых нет в TronScan
-    tokensFromTronGrid.forEach(token => {
-      if (!seenAddresses.has(token.contract_address)) {
-        seenAddresses.add(token.contract_address);
-        allTokens.push({
-          ...token,
-          source: 'TronGrid'
-        });
-      }
-    });
+    const allTokens = (tokensFromTronScan || []).map((token) => ({
+      ...token,
+      source: token.source || 'TronScan'
+    }));
 
     return {
       success: true,
       balanceTRX: balanceTRX,
-      tokens: allTokens, // Все TRC20 токены
-      raw: account
+      tokens: allTokens, // Все TRC20 токены из TronScan
+      raw: accountData
     };
   } catch (error) {
     console.error('Ошибка при проверке баланса TRON:', error);
