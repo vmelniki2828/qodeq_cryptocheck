@@ -545,7 +545,9 @@ export const convertToUSD = async (balanceResult) => {
       const trxPrice = await getTRXPrice();
       const trxUSD = balanceResult.balanceTRX * trxPrice;
       totalUSD += trxUSD;
-      console.log(`TRX | $${trxPrice.toFixed(4)} | $${trxUSD.toFixed(2)}`);
+      console.log(
+        `TRX | qty: ${Number(balanceResult.balanceTRX).toFixed(6)} | $${trxPrice.toFixed(4)} | $${trxUSD.toFixed(2)}`
+      );
     }
     
     // Конвертируем все TRC20 токены в USD
@@ -557,7 +559,9 @@ export const convertToUSD = async (balanceResult) => {
         // Выводим только токены с найденной ценой
         if (tokenPrice > 0) {
           totalUSD += tokenUSD;
-          console.log(`${token.symbol} | $${tokenPrice.toFixed(4)} | $${tokenUSD.toFixed(2)}`);
+          console.log(
+            `${token.symbol} | qty: ${Number(token.balance).toFixed(6)} | $${tokenPrice.toFixed(4)} | $${tokenUSD.toFixed(2)}`
+          );
         }
         // Токены без цены просто пропускаем (не выводим в консоль)
       }
@@ -566,7 +570,9 @@ export const convertToUSD = async (balanceResult) => {
     // Обратная совместимость со старым форматом (balanceUSDT)
     if (balanceResult.balanceUSDT && balanceResult.balanceUSDT > 0) {
       totalUSD += balanceResult.balanceUSDT; // USDT = 1 USD
-      console.log(`USDT | $1.0000 | $${balanceResult.balanceUSDT.toFixed(2)}`);
+      console.log(
+        `USDT | qty: ${Number(balanceResult.balanceUSDT).toFixed(6)} | $1.0000 | $${balanceResult.balanceUSDT.toFixed(2)}`
+      );
     }
     
     return totalUSD;
