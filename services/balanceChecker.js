@@ -30,6 +30,29 @@ export const detectWalletType = (address) => {
  */
 const getAllTRC20TokensFromTronScan = async (address) => {
   try {
+    const parseTokenBalance = (token) => {
+      // В разных endpoint TronScan баланс может приходить:
+      // - уже нормализованным (balanceValue),
+      // - в минимальных единицах (balance + decimals),
+      // - строкой/числом в разных полях.
+      const decimalsRaw =
+        token.tokenDecimal ?? token.decimals ?? token.token_info?.decimals ?? 6;
+      const decimals = Number.isFinite(Number(decimalsRaw)) ? Number(decimalsRaw) : 6;
+
+      const normalizedRaw = token.balanceValue ?? token.balance_value ?? token.amountValue;
+      if (normalizedRaw !== undefined && normalizedRaw !== null) {
+        const normalized = Number(normalizedRaw);
+        return Number.isFinite(normalized) ? normalized : 0;
+      }
+
+      const raw = token.balance ?? token.amount ?? 0;
+      const rawNumber = Number(raw);
+      if (!Number.isFinite(rawNumber)) {
+        return 0;
+      }
+      return rawNumber / Math.pow(10, decimals);
+    };
+
     // Используем несколько endpoints для получения всех токенов
     const endpoints = [
       `https://apilist.tronscan.org/api/account/tokens?address=${address}`,
@@ -74,8 +97,9 @@ const getAllTRC20TokensFromTronScan = async (address) => {
               return; // Пропускаем дубликаты
             }
             
-            const decimals = token.tokenDecimal || token.decimals || 6;
-            const balance = parseFloat(token.balance || token.balanceValue || 0) / Math.pow(10, decimals);
+            const decimalsRaw = token.tokenDecimal ?? token.decimals ?? token.token_info?.decimals ?? 6;
+            const decimals = Number.isFinite(Number(decimalsRaw)) ? Number(decimalsRaw) : 6;
+            const balance = parseTokenBalance(token);
             
             if (balance > 0) {
               seenContracts.add(contractAddress);
@@ -275,36 +299,8 @@ export const getTokenPriceFromTronScan = async (contractAddress, symbol = null) 
       }
     }
     
-    // Ищем по символу (точное совпадение)
-    if (symbol) {
-      const upperSymbol = symbol.toUpperCase();
-      if (assetsMap.has(upperSymbol)) {
-        const asset = assetsMap.get(upperSymbol);
-        if (asset.priceInUsd) {
-          return asset.priceInUsd;
-        }
-      }
-    }
-    
-    // Если не нашли точное совпадение, ищем частичное совпадение по символу/имени
-    if (symbol) {
-      const upperSymbol = symbol.toUpperCase();
-      for (const [key, asset] of assetsMap.entries()) {
-        // Проверяем, совпадает ли ключ (может быть аббревиатура или имя)
-        if (key === upperSymbol) {
-          if (asset.priceInUsd) {
-            return asset.priceInUsd;
-          }
-        }
-        // Проверяем частичное совпадение в аббревиатуре или имени
-        if ((asset.abbr && asset.abbr.toUpperCase() === upperSymbol) ||
-            (asset.name && asset.name.toUpperCase() === upperSymbol)) {
-          if (asset.priceInUsd) {
-            return asset.priceInUsd;
-          }
-        }
-      }
-    }
+    // Не фолбэчим по symbol: одинаковые тикеры у разных контрактов
+    // дают неверные "цены" для скам/клон-токенов.
     
     // Если цена не найдена - это нормально, не все токены есть в API TronScan
     // Не выводим отладочную информацию, чтобы не засорять консоль
