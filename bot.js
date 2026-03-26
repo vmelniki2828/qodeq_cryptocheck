@@ -264,10 +264,8 @@ bot.onText(/\/addwallet/, async (msg) => {
         `✅ Кошелек успешно добавлен!\n\n` +
         `📁 Проект: ${wallet.project}\n` +
         `👤 User ID: ${wallet.user_id}\n` +
-        `🏷️ Тип: ${wallet.type}\n` +
         `📝 Алиас: ${wallet.alias || 'не указан'}\n` +
-        `💼 Адрес: ${wallet.wallet_destination}\n` +
-        `🔗 Последняя транзакция: ${wallet.last_transaction || 'не указана'}`
+        `💼 Адрес: ${wallet.wallet_destination}\n`
       );
     } catch (error) {
       console.error('❌ Ошибка при добавлении кошелька:', error);
@@ -422,10 +420,8 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
       
       message += `${globalIndex + 1}. 📁 Проект: ${wallet.project}\n`;
       message += `   👤 User ID: ${wallet.user_id}\n`;
-      message += `   🏷️ Тип: ${wallet.type || 'не указан'}\n`;
       message += `   📝 Алиас: ${wallet.alias || 'не указан'}\n`;
       message += `   💼 Адрес: ${wallet.wallet_destination}\n`;
-      message += `   🔗 Последняя транзакция: ${wallet.last_transaction || 'не указана'}\n`;
       message += `   ${balanceStr}`;
       if (changeStr) {
         message += `   ${changeStr}`;
