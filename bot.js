@@ -26,6 +26,32 @@ if (!BOT_TOKEN) {
 // Создание экземпляра бота
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
+/** Команды для меню Telegram (кнопка «Меню» и подсказка при вводе «/») */
+const BOT_COMMANDS = [
+  { command: 'start', description: 'Справка и список команд' },
+  { command: 'addwallet', description: 'Добавить кошелёк в базу' },
+  { command: 'wallets', description: 'Кошельки с балансом больше $100' },
+  { command: 'checkwallet', description: 'Проверить один кошелёк по адресу' },
+  { command: 'checkbalance', description: 'Проверить балансы всех кошельков' }
+];
+
+const syncTelegramCommandMenu = async () => {
+  try {
+    await bot.setMyCommands(BOT_COMMANDS, { scope: { type: 'default' } });
+  } catch (err) {
+    console.error('⚠️ setMyCommands:', err.message || err);
+  }
+  try {
+    await bot.setChatMenuButton({
+      menu_button: JSON.stringify({ type: 'commands' })
+    });
+  } catch (err) {
+    console.error('⚠️ setChatMenuButton:', err.message || err);
+  }
+};
+
+syncTelegramCommandMenu();
+
 // Подключение к MongoDB
 connectDB();
 
@@ -176,9 +202,12 @@ bot.onText(/\/start/, async (msg) => {
   await bot.sendMessage(
     chatId,
     `📋 Доступные команды:\n\n` +
-    `/addwallet - Добавить кошелек\n` +
-    `/checkwallet - Проверить баланс одного кошелька (по адресу из базы)\n` +
-    `/wallets - Просмотреть все кошельки`
+    `/start — справка\n` +
+    `/addwallet — добавить кошелёк\n` +
+    `/wallets — кошельки с балансом > $100\n` +
+    `/checkwallet — проверить один кошелёк (адрес из базы)\n` +
+    `/checkbalance — проверить все кошельки\n\n` +
+    `💡 Список команд также в меню чата (кнопка «Меню» или ввод «/»).`
   );
 });
 
