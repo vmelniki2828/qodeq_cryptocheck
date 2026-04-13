@@ -13,8 +13,9 @@ const walletSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    required: true,
-    trim: true
+    required: false,
+    trim: true,
+    default: ''
   },
   alias: {
     type: String,

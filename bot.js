@@ -177,6 +177,7 @@ bot.onText(/\/start/, async (msg) => {
     chatId,
     `📋 Доступные команды:\n\n` +
     `/addwallet - Добавить кошелек\n` +
+    `/checkwallet - Проверить баланс одного кошелька (по адресу из базы)\n` +
     `/wallets - Просмотреть все кошельки`
   );
 });
@@ -196,19 +197,15 @@ bot.onText(/\/addwallet/, async (msg) => {
     chatId,
     '📝 Добавление нового кошелька\n\n' +
     'Отправьте данные в следующем формате (каждое значение с новой строки):\n\n' +
-    'project\n' +
-    'user_id\n' +
-    'type\n' +
-    'alias\n' +
-    'wallet_destination\n' +
-    'last_transaction\n\n' +
+    '📁 Проект\n' +
+    '👤 User ID\n' +
+    '📝 Алиас\n' +
+    '💼 Адрес\n\n' +
     'Пример:\n' +
-    'Auf\n' +
-    '81\n' +
-    'withdraw\n' +
+    'Unlim\n' +
+    '164501\n' +
     'Finassets USDT_TRC\n' +
-    'TBCKdBWiWG41oSSq4K4q5zcp56ya1V8xSy\n' +
-    '9/18/2025'
+    'TSsX76Who8D36fFoBKLSxihkX3CWwBNQcB'
   );
 
   // Сохраняем состояние ожидания данных
@@ -219,26 +216,20 @@ bot.onText(/\/addwallet/, async (msg) => {
     try {
       const lines = responseMsg.text.split('\n').map(line => line.trim()).filter(line => line);
       
-      if (lines.length < 6) {
-        await bot.sendMessage(chatId, '❌ Недостаточно данных. Нужно 6 строк: project, user_id, type, alias, wallet_destination, last_transaction');
+      if (lines.length < 4) {
+        await bot.sendMessage(chatId, '❌ Недостаточно данных. Нужно 4 строки: проект, User ID, алиас, адрес.');
         return;
       }
 
-      const [project, user_id, type, alias, wallet_destination, last_transaction] = lines;
+      const [project, user_id, alias, wallet_destination] = lines;
 
-      // Валидация
       if (!project || project.length === 0) {
         await bot.sendMessage(chatId, '❌ Проект не может быть пустым');
         return;
       }
 
       if (isNaN(parseInt(user_id))) {
-        await bot.sendMessage(chatId, '❌ user_id должен быть числом');
-        return;
-      }
-
-      if (!type || type.length === 0) {
-        await bot.sendMessage(chatId, '❌ Тип не может быть пустым');
+        await bot.sendMessage(chatId, '❌ User ID должен быть числом');
         return;
       }
 
@@ -250,10 +241,8 @@ bot.onText(/\/addwallet/, async (msg) => {
       const wallet = new Wallet({
         project: project.trim(),
         user_id: parseInt(user_id),
-        type: type.trim(),
         alias: alias ? alias.trim() : '',
-        wallet_destination: wallet_destination.trim(),
-        last_transaction: last_transaction ? last_transaction.trim() : ''
+        wallet_destination: wallet_destination.trim()
       });
 
       await wallet.save();
@@ -266,6 +255,7 @@ bot.onText(/\/addwallet/, async (msg) => {
         `👤 User ID: ${wallet.user_id}\n` +
         `📝 Алиас: ${wallet.alias || 'не указан'}\n` +
         `💼 Адрес: ${wallet.wallet_destination}\n`
+
       );
     } catch (error) {
       console.error('❌ Ошибка при добавлении кошелька:', error);
@@ -507,6 +497,78 @@ bot.on('callback_query', async (query) => {
   }
 });
 
+/**
+ * Проверяет баланс одного кошелька из БД, обновляет запись и пишет BalanceHistory.
+ * @returns {{ ok: true, balanceUSD: number, walletResult: object } | { ok: false, error: string }}
+ */
+const checkAndRecordSingleWallet = async (wallet) => {
+  const balanceResult = await checkBalance(wallet.wallet_destination);
+
+  if (!balanceResult.success) {
+    return {
+      ok: false,
+      error: balanceResult.error || 'Не удалось получить баланс'
+    };
+  }
+
+  const previousHistory = await BalanceHistory.findOne({ wallet_id: wallet._id }).sort({ checkedAt: -1 });
+  const previousBalance = previousHistory ? previousHistory.balance : null;
+
+  console.log(`\nКошелек: ${wallet.wallet_destination}`);
+  const balanceUSD = await convertToUSD(balanceResult);
+  console.log(`Итого: $${formatNumberWithCommas(balanceUSD)}`);
+
+  let difference = 0;
+  let percentChange = 0;
+  let isFirstCheck = false;
+
+  if (previousBalance !== null && previousBalance !== undefined) {
+    difference = balanceUSD - previousBalance;
+    percentChange = previousBalance > 0 ? (difference / previousBalance) * 100 : 0;
+
+    const diffSign = difference >= 0 ? '+' : '';
+    const percentSign = percentChange >= 0 ? '+' : '';
+    const formattedDiff = formatLargeNumber(difference);
+
+    console.log(`📊 Изменение: ${diffSign}$${formattedDiff} (${percentSign}${percentChange.toFixed(2)}%)`);
+    console.log(`   Предыдущий баланс: $${formatNumberWithCommas(previousBalance)}`);
+  } else {
+    isFirstCheck = true;
+    console.log(`📊 Первая проверка баланса`);
+  }
+  console.log('');
+
+  wallet.lastBalanceCheck = new Date();
+  await wallet.save();
+
+  const usdtToken = balanceResult.tokens?.find(
+    (t) => t.contract_address === 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+  );
+  const balanceUSDT = usdtToken ? usdtToken.balance : 0;
+
+  const balanceHistory = new BalanceHistory({
+    wallet_id: wallet._id,
+    wallet_destination: wallet.wallet_destination,
+    balance: balanceUSD,
+    previousBalance: previousBalance !== null && previousBalance !== undefined ? previousBalance : null,
+    balanceTRX: balanceResult.balanceTRX || 0,
+    balanceUSDT: balanceUSDT
+  });
+  await balanceHistory.save();
+
+  const walletResult = {
+    address: wallet.wallet_destination,
+    project: wallet.project,
+    currentBalance: balanceUSD,
+    previousBalance,
+    difference,
+    percentChange,
+    isFirstCheck
+  };
+
+  return { ok: true, balanceUSD, walletResult };
+};
+
 // Функция для проверки балансов всех кошельков
 const checkAllWalletsBalance = async () => {
   try {
@@ -547,81 +609,16 @@ const checkAllWalletsBalance = async () => {
 
     for (const wallet of wallets) {
       try {
-        const balanceResult = await checkBalance(wallet.wallet_destination);
-
-        if (balanceResult.success) {
-          // Получаем предыдущий баланс этого кошелька
-          const previousHistory = await BalanceHistory.findOne({ wallet_id: wallet._id })
-            .sort({ checkedAt: -1 });
-          const previousBalance = previousHistory ? previousHistory.balance : null;
-
-          // Выводим токены, цены и суммы
-          console.log(`\nКошелек: ${wallet.wallet_destination}`);
-          const balanceUSD = await convertToUSD(balanceResult);
-          console.log(`Итого: $${formatNumberWithCommas(balanceUSD)}`);
-          
-          // Сравнение с предыдущим балансом
-          let difference = 0;
-          let percentChange = 0;
-          let isFirstCheck = false;
-          
-          if (previousBalance !== null && previousBalance !== undefined) {
-            difference = balanceUSD - previousBalance;
-            percentChange = previousBalance > 0 ? (difference / previousBalance) * 100 : 0;
-            
-            const diffSign = difference >= 0 ? '+' : '';
-            const percentSign = percentChange >= 0 ? '+' : '';
-            const formattedDiff = formatLargeNumber(difference);
-            
-            console.log(`📊 Изменение: ${diffSign}$${formattedDiff} (${percentSign}${percentChange.toFixed(2)}%)`);
-            console.log(`   Предыдущий баланс: $${formatNumberWithCommas(previousBalance)}`);
-          } else {
-            isFirstCheck = true;
-            console.log(`📊 Первая проверка баланса`);
-          }
-          console.log('');
-          
-          totalNetAssets += balanceUSD;
-          
-          // Сохраняем данные о кошельке для вывода в Telegram
-          walletResults.push({
-            address: wallet.wallet_destination,
-            project: wallet.project,
-            currentBalance: balanceUSD,
-            previousBalance: previousBalance,
-            difference: difference,
-            percentChange: percentChange,
-            isFirstCheck: isFirstCheck
-          });
-          
-          // Сохраняем только сырые данные (без конвертации в USD)
-          wallet.lastBalanceCheck = new Date();
-          await wallet.save();
-
-          // Находим USDT для обратной совместимости
-          const usdtToken = balanceResult.tokens?.find(
-            t => t.contract_address === 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
-          );
-          const balanceUSDT = usdtToken ? usdtToken.balance : 0;
-
-          // Сохраняем в историю сырые данные
-          const balanceHistory = new BalanceHistory({
-            wallet_id: wallet._id,
-            wallet_destination: wallet.wallet_destination,
-            balance: balanceUSD, // Сохраняем общий баланс в USD
-            previousBalance: previousBalance !== null && previousBalance !== undefined ? previousBalance : null, // Сохраняем предыдущий баланс
-            balanceTRX: balanceResult.balanceTRX || 0,
-            balanceUSDT: balanceUSDT
-          });
-          await balanceHistory.save();
-
+        const recorded = await checkAndRecordSingleWallet(wallet);
+        if (recorded.ok) {
+          totalNetAssets += recorded.balanceUSD;
+          walletResults.push(recorded.walletResult);
           successCount++;
         } else {
           errorCount++;
         }
 
-        // Задержка между запросами (чтобы не превысить лимиты API)
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (error) {
         errorCount++;
       }
@@ -634,6 +631,75 @@ const checkAllWalletsBalance = async () => {
     return { totalNetAssets: 0, previousTotalNetAssets: 0, walletResults: [] };
   }
 };
+
+// Проверка баланса одного кошелька по адресу (должен быть в базе)
+bot.onText(/\/checkwallet(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      await bot.sendMessage(chatId, '⚠️ База данных недоступна. Проверка не может быть выполнена.');
+      return;
+    }
+
+    const rawArg = match[1]?.trim();
+    if (!rawArg) {
+      await bot.sendMessage(
+        chatId,
+        '🔍 Проверка одного кошелька\n\n' +
+          'Укажите адрес из базы в той же строке, например:\n' +
+          '/checkwallet TSsX76Who8D36fFoBKLSxihkX3CWwBNQcB\n\n' +
+          'Кошелёк должен быть добавлен через /addwallet.'
+      );
+      return;
+    }
+
+    const address = rawArg.split(/\s+/)[0];
+    const wallet = await Wallet.findOne({ wallet_destination: address });
+
+    if (!wallet) {
+      await bot.sendMessage(
+        chatId,
+        '❌ Кошелёк с таким адресом не найден в базе.\n\nПроверьте адрес или добавьте кошелёк: /addwallet'
+      );
+      return;
+    }
+
+    await bot.sendMessage(chatId, '🔄 Проверяю баланс…');
+
+    const recorded = await checkAndRecordSingleWallet(wallet);
+
+    if (!recorded.ok) {
+      await bot.sendMessage(chatId, `❌ ${recorded.error}`);
+      return;
+    }
+
+    const wr = recorded.walletResult;
+    let reply =
+      `✅ Баланс обновлён\n\n` +
+      `📁 Проект: ${wr.project}\n` +
+      `👤 User ID: ${wallet.user_id}\n` +
+      `📝 Алиас: ${wallet.alias || 'не указан'}\n` +
+      `💼 Адрес: ${wr.address}\n\n` +
+      `💰 Оценка (USD): $${formatNumberWithCommas(wr.currentBalance)}\n`;
+
+    if (!wr.isFirstCheck) {
+      const diffSign = wr.difference >= 0 ? '+' : '';
+      const pctSign = wr.percentChange >= 0 ? '+' : '';
+      reply +=
+        `\n📊 Изменение: ${diffSign}$${formatLargeNumber(wr.difference)} (${pctSign}${wr.percentChange.toFixed(2)}%)\n` +
+        `Предыдущий баланс: $${formatNumberWithCommas(wr.previousBalance)}`;
+    } else {
+      reply += `\n📊 Первая запись в истории для этого кошелька.`;
+    }
+
+    await bot.sendMessage(chatId, reply);
+  } catch (error) {
+    console.error('❌ Ошибка при проверке одного кошелька:', error);
+    await bot.sendMessage(chatId, `❌ Ошибка: ${error.message || error}`);
+  }
+});
 
 // Обработка команды /checkbalance - проверка балансов всех кошельков
 bot.onText(/\/checkbalance/, async (msg) => {
