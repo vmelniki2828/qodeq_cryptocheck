@@ -54,6 +54,9 @@ const syncTelegramCommandMenu = async () => {
 
 syncTelegramCommandMenu();
 
+// Запоминаем активные фильтры и выбор проекта для /wallets по chat_id
+const walletsViewState = new Map();
+
 // Подключение к MongoDB
 connectDB();
 
@@ -305,7 +308,17 @@ bot.onText(/\/addwallet/, async (msg) => {
     } catch (error) {
       console.error('❌ Ошибка при добавлении кошелька:', error);
       if (error.code === 11000) {
-        await bot.sendMessage(chatId, '❌ Кошелек с таким адресом уже существует.');
+        await Wallet.updateOne(
+          { wallet_destination: wallet_destination.trim() },
+          {
+            $set: {
+              project: project.trim(),
+              user_id: parseInt(user_id),
+              alias: alias ? alias.trim() : ''
+            }
+          }
+        );
+        await bot.sendMessage(chatId, '♻️ Кошелек уже существовал и был обновлен новыми данными.');
       } else {
         await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
       }
@@ -332,17 +345,43 @@ bot.onText(/\/addwallets/, async (msg) => {
 });
 
 // Функция для отображения страницы кошельков
-const showWalletsPage = async (chatId, page = 0, messageId = null) => {
+const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter = '') => {
   try {
     if (mongoose.connection.readyState !== 1) {
       await bot.sendMessage(chatId, '⚠️ База данных недоступна.');
       return;
     }
 
-    const allWallets = await Wallet.find().sort({ createdAt: -1 });
+    const normalizedFilter = String(projectFilter || '').trim();
+    const currentState = walletsViewState.get(chatId) || {};
+    const selectedProjects = Array.isArray(currentState.selectedProjects)
+      ? currentState.selectedProjects
+      : [];
+
+    const filterQuery = selectedProjects.length > 0
+      ? { project: { $in: selectedProjects } }
+      : (normalizedFilter
+          ? { project: { $regex: normalizedFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+          : {});
+
+    const allWallets = await Wallet.find(filterQuery).sort({ createdAt: -1 });
 
     if (allWallets.length === 0) {
-      await bot.sendMessage(chatId, '📭 В базе данных пока нет кошельков.\n\nИспользуйте /addwallet для добавления.');
+      if (selectedProjects.length > 0) {
+        await bot.sendMessage(
+          chatId,
+          `📭 По выбранным проектам кошельки не найдены.\n\n` +
+          `Используйте /wallets, чтобы выбрать другие проекты.`
+        );
+      } else if (normalizedFilter) {
+        await bot.sendMessage(
+          chatId,
+          `📭 По фильтру проекта "${normalizedFilter}" кошельки не найдены.\n\n` +
+          `Попробуйте /wallets без фильтра или укажите другой проект.`
+        );
+      } else {
+        await bot.sendMessage(chatId, '📭 В базе данных пока нет кошельков.\n\nИспользуйте /addwallet для добавления.');
+      }
       return;
     }
 
@@ -405,7 +444,13 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
     }
 
     if (walletsWithBalance.length === 0) {
-      await bot.sendMessage(chatId, '📭 Нет кошельков с балансом больше $100.');
+      if (selectedProjects.length > 0) {
+        await bot.sendMessage(chatId, `📭 Для выбранных проектов нет кошельков с балансом больше $100.`);
+      } else if (normalizedFilter) {
+        await bot.sendMessage(chatId, `📭 Для проекта "${normalizedFilter}" нет кошельков с балансом больше $100.`);
+      } else {
+        await bot.sendMessage(chatId, '📭 Нет кошельков с балансом больше $100.');
+      }
       return;
     }
 
@@ -423,6 +468,11 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
     let allLastCheckTimes = [];
     
     let message = `💼 Кошельки с балансом > $100 (${walletsWithBalance.length}):\n`;
+    if (selectedProjects.length > 0) {
+      message += `🔎 Выбраны проекты: ${selectedProjects.join(', ')}\n`;
+    } else if (normalizedFilter) {
+      message += `🔎 Фильтр по проекту: ${normalizedFilter}\n`;
+    }
     message += `📄 Страница ${currentPage + 1} из ${totalPages}\n\n`;
     
     for (let i = 0; i < walletsOnPage.length; i++) {
@@ -540,11 +590,96 @@ const showWalletsPage = async (chatId, page = 0, messageId = null) => {
   }
 };
 
-// Обработка команды /wallets - просмотр всех кошельков
-bot.onText(/\/wallets/, async (msg) => {
+const buildProjectsKeyboard = (allProjects, selectedProjects) => {
+  const inline_keyboard = [];
+  const normalizedSelected = new Set(selectedProjects);
+
+  for (let i = 0; i < allProjects.length; i += 2) {
+    const row = [];
+    const first = allProjects[i];
+    const second = allProjects[i + 1];
+
+    if (first) {
+      row.push({
+        text: `${normalizedSelected.has(first) ? '✅' : '☑️'} ${first}`,
+        callback_data: `project_toggle_${i}`
+      });
+    }
+    if (second) {
+      row.push({
+        text: `${normalizedSelected.has(second) ? '✅' : '☑️'} ${second}`,
+        callback_data: `project_toggle_${i + 1}`
+      });
+    }
+    inline_keyboard.push(row);
+  }
+
+  inline_keyboard.push([
+    { text: '✅ Показать отмеченные', callback_data: 'project_apply' },
+    { text: '🧹 Сбросить', callback_data: 'project_clear' }
+  ]);
+
+  return { inline_keyboard };
+};
+
+const showProjectsSelection = async (chatId, messageId = null) => {
+  const projects = await Wallet.distinct('project', { project: { $ne: null } });
+  const allProjects = projects
+    .map((p) => String(p || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, 'ru'));
+
+  if (allProjects.length === 0) {
+    await bot.sendMessage(chatId, '📭 В базе пока нет проектов.');
+    return;
+  }
+
+  const currentState = walletsViewState.get(chatId) || {};
+  const selectedProjects = Array.isArray(currentState.selectedProjects)
+    ? currentState.selectedProjects.filter((p) => allProjects.includes(p))
+    : [];
+
+  walletsViewState.set(chatId, {
+    ...currentState,
+    selectedProjects,
+    availableProjects: allProjects
+  });
+
+  const text =
+    `📁 Выберите проекты для вывода /wallets\n\n` +
+    `Отметьте один или несколько проектов, затем нажмите "Показать отмеченные".`;
+  const reply_markup = buildProjectsKeyboard(allProjects, selectedProjects);
+
+  if (messageId) {
+    await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup
+    });
+  } else {
+    await bot.sendMessage(chatId, text, { reply_markup });
+  }
+};
+
+// Обработка команды /wallets - просмотр кошельков
+bot.onText(/\/wallets(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
-  await showWalletsPage(chatId, 0);
+  const rawText = String(msg.text || '');
+  const normalizedText = rawText.replace(/^\/wallets(?:@\w+)?\s*/i, '');
+  const projectFilter = normalizedText.trim() || String(match?.[1] || '').trim();
+
+  if (!projectFilter) {
+    await showProjectsSelection(chatId);
+    return;
+  }
+
+  walletsViewState.set(chatId, {
+    projectFilter,
+    selectedProjects: [],
+    availableProjects: []
+  });
+  await showWalletsPage(chatId, 0, null, projectFilter);
 });
 
 // Обработка callback-запросов для навигации по страницам
@@ -556,7 +691,58 @@ bot.on('callback_query', async (query) => {
   if (data && data.startsWith('wallets_page_')) {
     const page = parseInt(data.replace('wallets_page_', ''), 10);
     await bot.answerCallbackQuery({ callback_query_id: query.id });
-    await showWalletsPage(chatId, page, messageId);
+    const projectFilter = walletsViewState.get(chatId)?.projectFilter || '';
+    await showWalletsPage(chatId, page, messageId, projectFilter);
+    return;
+  }
+
+  if (data && data.startsWith('project_toggle_')) {
+    const index = parseInt(data.replace('project_toggle_', ''), 10);
+    const state = walletsViewState.get(chatId) || {};
+    const availableProjects = Array.isArray(state.availableProjects) ? state.availableProjects : [];
+    const selectedProjects = Array.isArray(state.selectedProjects) ? [...state.selectedProjects] : [];
+    const project = availableProjects[index];
+    if (!project) {
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: 'Проект не найден.' });
+      return;
+    }
+
+    const selectedSet = new Set(selectedProjects);
+    if (selectedSet.has(project)) {
+      selectedSet.delete(project);
+    } else {
+      selectedSet.add(project);
+    }
+
+    walletsViewState.set(chatId, {
+      ...state,
+      selectedProjects: Array.from(selectedSet)
+    });
+
+    await bot.answerCallbackQuery({ callback_query_id: query.id });
+    await showProjectsSelection(chatId, messageId);
+    return;
+  }
+
+  if (data === 'project_clear') {
+    const state = walletsViewState.get(chatId) || {};
+    walletsViewState.set(chatId, { ...state, selectedProjects: [], projectFilter: '' });
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: 'Выбор очищен.' });
+    await showProjectsSelection(chatId, messageId);
+    return;
+  }
+
+  if (data === 'project_apply') {
+    const state = walletsViewState.get(chatId) || {};
+    const selectedProjects = Array.isArray(state.selectedProjects) ? state.selectedProjects : [];
+    if (selectedProjects.length === 0) {
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: 'Выберите хотя бы один проект.' });
+      return;
+    }
+
+    walletsViewState.set(chatId, { ...state, projectFilter: '' });
+    await bot.answerCallbackQuery({ callback_query_id: query.id });
+    await showWalletsPage(chatId, 0, messageId, '');
   }
 });
 
@@ -957,7 +1143,7 @@ bot.on('message', async (msg) => {
     let successCount = 0;
     let skippedEmptyRows = 0;
     const rowErrors = [];
-    const seenWalletsInFile = new Set();
+    let updatedCount = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const rowNumber = i + 1;
@@ -997,28 +1183,26 @@ bot.on('message', async (msg) => {
         continue;
       }
 
-      const walletKey = walletDestination.toLowerCase();
-      if (seenWalletsInFile.has(walletKey)) {
-        rowErrors.push(`Строка ${rowNumber}: дублирование адреса в файле (${walletDestination}).`);
-        continue;
-      }
-      seenWalletsInFile.add(walletKey);
-
       try {
-        const wallet = new Wallet({
-          project,
-          user_id: userId,
-          alias,
-          wallet_destination: walletDestination
-        });
-        await wallet.save();
-        successCount++;
-      } catch (error) {
-        if (error?.code === 11000) {
-          rowErrors.push(`Строка ${rowNumber}: дублирование адреса в базе (${walletDestination}).`);
-        } else {
-          rowErrors.push(`Строка ${rowNumber}: ${error.message}`);
+        const updateResult = await Wallet.updateOne(
+          { wallet_destination: walletDestination },
+          {
+            $set: {
+              project,
+              user_id: userId,
+              alias
+            }
+          },
+          { upsert: true }
+        );
+
+        if (updateResult.upsertedCount > 0) {
+          successCount++;
+        } else if (updateResult.matchedCount > 0) {
+          updatedCount++;
         }
+      } catch (error) {
+        rowErrors.push(`Строка ${rowNumber}: ${error.message}`);
       }
     }
 
@@ -1026,6 +1210,7 @@ bot.on('message', async (msg) => {
       `✅ Импорт завершен\n\n` +
       `📄 Обработано строк: ${rows.length}\n` +
       `➕ Добавлено: ${successCount}\n` +
+      `♻️ Обновлено существующих: ${updatedCount}\n` +
       `⏭️ Пустых строк пропущено: ${skippedEmptyRows}\n` +
       `❌ Ошибок: ${rowErrors.length}\n`;
 
