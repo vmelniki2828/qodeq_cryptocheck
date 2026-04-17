@@ -251,15 +251,11 @@ bot.onText(/\/addwallet/, async (msg) => {
   bot.once('message', async (responseMsg) => {
     if (responseMsg.chat.id !== chatId) return;
     if (responseMsg.text && responseMsg.text.startsWith('/')) return;
+    if (responseMsg.document) return;
 
     try {
       const rawText = typeof responseMsg.text === 'string' ? responseMsg.text : '';
       if (!rawText) {
-        await bot.sendMessage(
-          chatId,
-          '❌ Ожидался текст с 4 строками (проект, User ID, алиас, адрес).\n' +
-          'Пожалуйста, запустите /addwallet и отправьте данные текстом.'
-        );
         return;
       }
 
@@ -966,6 +962,12 @@ bot.on('message', async (msg) => {
     for (let i = 0; i < rows.length; i++) {
       const rowNumber = i + 1;
       const row = Array.isArray(rows[i]) ? rows[i] : [];
+      const extraColumns = row.slice(4).map(normalizeCell).filter(Boolean);
+      if (extraColumns.length > 0) {
+        rowErrors.push(`Строка ${rowNumber}: ожидалось 4 столбца, найдено больше.`);
+        continue;
+      }
+
       const [projectRaw, userIdRaw, aliasRaw, walletRaw] = row;
 
       const project = normalizeCell(projectRaw);
