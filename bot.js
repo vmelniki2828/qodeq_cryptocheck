@@ -31,7 +31,7 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const BOT_COMMANDS = [
   { command: 'start', description: 'Справка и список команд' },
   { command: 'addwallet', description: 'Добавить кошелёк в базу' },
-  { command: 'addwallets', description: 'Массовый импорт кошельков из XLSX' },
+  { command: 'addwallets', description: 'Массовый импорт кошельков из XLSX/CSV' },
   { command: 'wallets', description: 'Кошельки с балансом больше $100' },
   { command: 'checkwallet', description: 'Проверить один кошелёк по адресу' },
   { command: 'checkbalance', description: 'Проверить балансы всех кошельков' }
@@ -349,7 +349,7 @@ bot.onText(/\/addwallet/, async (msg) => {
   });
 });
 
-// Массовая загрузка кошельков из xlsx
+// Массовая загрузка кошельков из xlsx/csv
 bot.onText(/\/addwallets/, async (msg) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
@@ -357,7 +357,7 @@ bot.onText(/\/addwallets/, async (msg) => {
   await bot.sendMessage(
     chatId,
     '📥 Массовая загрузка кошельков\n\n' +
-    'Отправьте файл .xlsx с 4 столбцами БЕЗ заголовка:\n' +
+    'Отправьте файл .xlsx или .csv с 4 столбцами БЕЗ заголовка:\n' +
     '1) 📁 Проект\n' +
     '2) 👤 User ID\n' +
     '3) 📝 Алиас\n' +
@@ -1173,8 +1173,10 @@ bot.on('message', async (msg) => {
   }
 
   const fileName = msg.document.file_name || '';
-  const isXlsx = fileName.toLowerCase().endsWith('.xlsx');
-  if (!isXlsx) {
+  const lowerFileName = fileName.toLowerCase();
+  const isXlsx = lowerFileName.endsWith('.xlsx');
+  const isCsv = lowerFileName.endsWith('.csv');
+  if (!isXlsx && !isCsv) {
     return;
   }
 
@@ -1199,7 +1201,11 @@ bot.on('message', async (msg) => {
     }
 
     const fileBuffer = Buffer.from(await fileResponse.arrayBuffer());
-    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+    const workbook = XLSX.read(fileBuffer, {
+      type: 'buffer',
+      raw: false,
+      codepage: 65001
+    });
     const firstSheetName = workbook.SheetNames[0];
     if (!firstSheetName) {
       throw new Error('Файл не содержит листов.');
@@ -1302,7 +1308,7 @@ bot.on('message', async (msg) => {
 
     await bot.sendMessage(chatId, report);
   } catch (error) {
-    console.error('❌ Ошибка импорта xlsx:', error);
+    console.error('❌ Ошибка импорта файла:', error);
     await bot.sendMessage(chatId, `❌ Не удалось обработать файл: ${error.message}`);
   }
 });
