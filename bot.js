@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import cron from 'node-cron';
+import XLSX from 'xlsx';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { connectDB } from './config/database.js';
@@ -30,6 +31,7 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const BOT_COMMANDS = [
   { command: 'start', description: 'Справка и список команд' },
   { command: 'addwallet', description: 'Добавить кошелёк в базу' },
+  { command: 'addwallets', description: 'Массовый импорт кошельков из XLSX' },
   { command: 'wallets', description: 'Кошельки с балансом больше $100' },
   { command: 'checkwallet', description: 'Проверить один кошелёк по адресу' },
   { command: 'checkbalance', description: 'Проверить балансы всех кошельков' }
@@ -194,6 +196,13 @@ const registerBotSubscriber = async (msg) => {
   }
 };
 
+const normalizeCell = (value) => String(value ?? '').trim();
+
+const toValidUserId = (value) => {
+  const parsed = Number.parseInt(normalizeCell(value), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+};
+
 // Обработка команды /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -204,6 +213,7 @@ bot.onText(/\/start/, async (msg) => {
     `📋 Доступные команды:\n\n` +
     `/start — справка\n` +
     `/addwallet — добавить кошелёк\n` +
+    `/addwallets — массово загрузить кошельки из XLSX\n` +
     `/wallets — кошельки с балансом > $100\n` +
     `/checkwallet — проверить один кошелёк (адрес из базы)\n` +
     `/checkbalance — проверить все кошельки\n\n` +
@@ -295,6 +305,24 @@ bot.onText(/\/addwallet/, async (msg) => {
       }
     }
   });
+});
+
+// Массовая загрузка кошельков из xlsx
+bot.onText(/\/addwallets/, async (msg) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+
+  await bot.sendMessage(
+    chatId,
+    '📥 Массовая загрузка кошельков\n\n' +
+    'Отправьте файл .xlsx с 4 столбцами БЕЗ заголовка:\n' +
+    '1) 📁 Проект\n' +
+    '2) 👤 User ID\n' +
+    '3) 📝 Алиас\n' +
+    '4) 💼 Адрес\n\n' +
+    'Пример строки:\n' +
+    'Unlim | 164501 | Finassets USDT_TRC | TSsX76Who8D36fFoBKLSxihkX3CWwBNQcB'
+  );
 });
 
 // Функция для отображения страницы кошельков
@@ -870,6 +898,139 @@ bot.on('message', async (msg) => {
 
   // Пропускаем сообщения, которые обрабатываются в /addwallet
   // (они обрабатываются через bot.once)
+
+  if (!msg.document) {
+    return;
+  }
+
+  const fileName = msg.document.file_name || '';
+  const isXlsx = fileName.toLowerCase().endsWith('.xlsx');
+  if (!isXlsx) {
+    return;
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    await bot.sendMessage(chatId, '⚠️ База данных недоступна. Импорт невозможен.');
+    return;
+  }
+
+  await registerBotSubscriber(msg);
+  await bot.sendMessage(chatId, '⏳ Получил файл, начинаю импорт...');
+
+  try {
+    const fileInfo = await bot.getFile(msg.document.file_id);
+    if (!fileInfo.file_path) {
+      throw new Error('Не удалось получить путь к файлу в Telegram.');
+    }
+
+    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+    const fileResponse = await fetch(fileUrl);
+    if (!fileResponse.ok) {
+      throw new Error(`Ошибка загрузки файла из Telegram: ${fileResponse.status}`);
+    }
+
+    const fileBuffer = Buffer.from(await fileResponse.arrayBuffer());
+    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+    const firstSheetName = workbook.SheetNames[0];
+    if (!firstSheetName) {
+      throw new Error('Файл не содержит листов.');
+    }
+
+    const sheet = workbook.Sheets[firstSheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      raw: false,
+      defval: ''
+    });
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      await bot.sendMessage(chatId, '⚠️ Файл пустой. Добавьте строки с данными.');
+      return;
+    }
+
+    let successCount = 0;
+    let skippedEmptyRows = 0;
+    const rowErrors = [];
+    const seenWalletsInFile = new Set();
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowNumber = i + 1;
+      const row = Array.isArray(rows[i]) ? rows[i] : [];
+      const [projectRaw, userIdRaw, aliasRaw, walletRaw] = row;
+
+      const project = normalizeCell(projectRaw);
+      const userId = toValidUserId(userIdRaw);
+      const alias = normalizeCell(aliasRaw);
+      const walletDestination = normalizeCell(walletRaw);
+
+      const isEntireRowEmpty = [project, normalizeCell(userIdRaw), alias, walletDestination]
+        .every((value) => value === '');
+      if (isEntireRowEmpty) {
+        skippedEmptyRows++;
+        continue;
+      }
+
+      if (!project) {
+        rowErrors.push(`Строка ${rowNumber}: пустой проект.`);
+        continue;
+      }
+
+      if (userId === null) {
+        rowErrors.push(`Строка ${rowNumber}: некорректный User ID.`);
+        continue;
+      }
+
+      if (!walletDestination) {
+        rowErrors.push(`Строка ${rowNumber}: пустой адрес кошелька.`);
+        continue;
+      }
+
+      const walletKey = walletDestination.toLowerCase();
+      if (seenWalletsInFile.has(walletKey)) {
+        rowErrors.push(`Строка ${rowNumber}: дублирование адреса в файле (${walletDestination}).`);
+        continue;
+      }
+      seenWalletsInFile.add(walletKey);
+
+      try {
+        const wallet = new Wallet({
+          project,
+          user_id: userId,
+          alias,
+          wallet_destination: walletDestination
+        });
+        await wallet.save();
+        successCount++;
+      } catch (error) {
+        if (error?.code === 11000) {
+          rowErrors.push(`Строка ${rowNumber}: дублирование адреса в базе (${walletDestination}).`);
+        } else {
+          rowErrors.push(`Строка ${rowNumber}: ${error.message}`);
+        }
+      }
+    }
+
+    let report =
+      `✅ Импорт завершен\n\n` +
+      `📄 Обработано строк: ${rows.length}\n` +
+      `➕ Добавлено: ${successCount}\n` +
+      `⏭️ Пустых строк пропущено: ${skippedEmptyRows}\n` +
+      `❌ Ошибок: ${rowErrors.length}\n`;
+
+    if (rowErrors.length > 0) {
+      const MAX_ERRORS_TO_SHOW = 20;
+      const visibleErrors = rowErrors.slice(0, MAX_ERRORS_TO_SHOW);
+      report += `\n🧾 Отчет по ошибкам:\n- ${visibleErrors.join('\n- ')}`;
+      if (rowErrors.length > MAX_ERRORS_TO_SHOW) {
+        report += `\n- ... и еще ${rowErrors.length - MAX_ERRORS_TO_SHOW} ошибок.`;
+      }
+    }
+
+    await bot.sendMessage(chatId, report);
+  } catch (error) {
+    console.error('❌ Ошибка импорта xlsx:', error);
+    await bot.sendMessage(chatId, `❌ Не удалось обработать файл: ${error.message}`);
+  }
 });
 
 // Обработка ошибок polling с автоматическим переподключением

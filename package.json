@@ -20,6 +20,7 @@
     "dotenv": "^16.3.1",
     "mongoose": "^8.0.3",
     "node-cron": "^4.2.1",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "xlsx": "^0.18.5"
   }
 }
