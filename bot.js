@@ -206,6 +206,29 @@ const toValidUserId = (value) => {
   return Number.isInteger(parsed) ? parsed : null;
 };
 
+const parseWalletsCommandArgs = (rawText = '') => {
+  const withoutCommand = String(rawText).replace(/^\/wallets(?:@\w+)?\s*/i, '').trim();
+  if (!withoutCommand) {
+    return { projectFilter: '', minBalance: null };
+  }
+
+  const parts = withoutCommand.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    return { projectFilter: '', minBalance: null };
+  }
+
+  const lastPart = parts[parts.length - 1].replace(',', '.');
+  const lastAsNumber = Number(lastPart);
+  if (Number.isFinite(lastAsNumber) && lastAsNumber >= 0) {
+    return {
+      projectFilter: parts.slice(0, -1).join(' ').trim(),
+      minBalance: lastAsNumber
+    };
+  }
+
+  return { projectFilter: withoutCommand, minBalance: null };
+};
+
 // Обработка команды /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -357,6 +380,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
     const selectedProjects = Array.isArray(currentState.selectedProjects)
       ? currentState.selectedProjects
       : [];
+    const minBalance = Number.isFinite(currentState.minBalance) ? currentState.minBalance : 100;
 
     const filterQuery = selectedProjects.length > 0
       ? { project: { $in: selectedProjects } }
@@ -386,7 +410,6 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
     }
 
     // Оптимизация: получаем все последние балансы одним запросом через агрегацию
-    const MIN_BALANCE = 100;
     const walletIds = allWallets.map(w => w._id);
     
     // Получаем последние балансы для всех кошельков одним запросом
@@ -432,8 +455,8 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
         lastCheckTime = wallet.lastBalanceCheck;
       }
       
-      // Добавляем только кошельки с балансом больше $100
-      if (currentBalance > MIN_BALANCE) {
+      // Добавляем только кошельки с балансом выше выбранного порога
+      if (currentBalance > minBalance) {
         walletsWithBalance.push(wallet);
         walletBalanceData.set(walletIdStr, {
           balance: currentBalance,
@@ -445,11 +468,11 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
 
     if (walletsWithBalance.length === 0) {
       if (selectedProjects.length > 0) {
-        await bot.sendMessage(chatId, `📭 Для выбранных проектов нет кошельков с балансом больше $100.`);
+        await bot.sendMessage(chatId, `📭 Для выбранных проектов нет кошельков с балансом больше $${formatNumberWithCommas(minBalance)}.`);
       } else if (normalizedFilter) {
-        await bot.sendMessage(chatId, `📭 Для проекта "${normalizedFilter}" нет кошельков с балансом больше $100.`);
+        await bot.sendMessage(chatId, `📭 Для проекта "${normalizedFilter}" нет кошельков с балансом больше $${formatNumberWithCommas(minBalance)}.`);
       } else {
-        await bot.sendMessage(chatId, '📭 Нет кошельков с балансом больше $100.');
+        await bot.sendMessage(chatId, `📭 Нет кошельков с балансом больше $${formatNumberWithCommas(minBalance)}.`);
       }
       return;
     }
@@ -467,7 +490,7 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
     // Собираем все времена последней проверки для определения самого последнего
     let allLastCheckTimes = [];
     
-    let message = `💼 Кошельки с балансом > $100 (${walletsWithBalance.length}):\n`;
+    let message = `💼 Кошельки с балансом > $${formatNumberWithCommas(minBalance)} (${walletsWithBalance.length}):\n`;
     if (selectedProjects.length > 0) {
       message += `🔎 Выбраны проекты: ${selectedProjects.join(', ')}\n`;
     } else if (normalizedFilter) {
@@ -638,16 +661,20 @@ const showProjectsSelection = async (chatId, messageId = null) => {
   const selectedProjects = Array.isArray(currentState.selectedProjects)
     ? currentState.selectedProjects.filter((p) => allProjects.includes(p))
     : [];
+  const minBalance = Number.isFinite(currentState.minBalance) ? currentState.minBalance : 100;
 
   walletsViewState.set(chatId, {
     ...currentState,
     selectedProjects,
-    availableProjects: allProjects
+    availableProjects: allProjects,
+    minBalance
   });
 
   const text =
     `📁 Выберите проекты для вывода /wallets\n\n` +
-    `Отметьте один или несколько проектов, затем нажмите "Показать отмеченные".`;
+    `Текущий порог: > $${formatNumberWithCommas(minBalance)}\n` +
+    `Отметьте один или несколько проектов, затем нажмите "Показать отмеченные".\n` +
+    `После этого бот попросит ввести сумму.`;
   const reply_markup = buildProjectsKeyboard(allProjects, selectedProjects);
 
   if (messageId) {
@@ -666,16 +693,26 @@ bot.onText(/\/wallets(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
   const rawText = String(msg.text || '');
-  const normalizedText = rawText.replace(/^\/wallets(?:@\w+)?\s*/i, '');
-  const projectFilter = normalizedText.trim() || String(match?.[1] || '').trim();
+  const parsedArgs = parseWalletsCommandArgs(rawText);
+  const projectFilter = parsedArgs.projectFilter || String(match?.[1] || '').trim();
+  const state = walletsViewState.get(chatId) || {};
+  const minBalance = Number.isFinite(parsedArgs.minBalance)
+    ? parsedArgs.minBalance
+    : (Number.isFinite(state.minBalance) ? state.minBalance : 100);
 
   if (!projectFilter) {
+    walletsViewState.set(chatId, {
+      ...state,
+      projectFilter: '',
+      minBalance
+    });
     await showProjectsSelection(chatId);
     return;
   }
 
   walletsViewState.set(chatId, {
     projectFilter,
+    minBalance,
     selectedProjects: [],
     availableProjects: []
   });
@@ -740,9 +777,18 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    walletsViewState.set(chatId, { ...state, projectFilter: '' });
+    walletsViewState.set(chatId, {
+      ...state,
+      projectFilter: '',
+      awaitingMinBalanceInput: true
+    });
     await bot.answerCallbackQuery({ callback_query_id: query.id });
-    await showWalletsPage(chatId, 0, messageId, '');
+    await bot.sendMessage(
+      chatId,
+      'Введите минимальную сумму в USD для выбранных проектов, например: 500\n' +
+      'Можно с точкой/запятой: 2500.50 или 2500,50'
+    );
+    return;
   }
 });
 
@@ -1082,6 +1128,37 @@ console.log('⏰ Автоматическая проверка балансов 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
+  const state = walletsViewState.get(chatId) || {};
+
+  if (state.awaitingMinBalanceInput && text && !text.startsWith('/')) {
+    const normalized = text.trim().replace(',', '.');
+    const value = Number(normalized);
+    if (!Number.isFinite(value) || value < 0) {
+      await bot.sendMessage(chatId, '❌ Некорректная сумма. Введите число больше или равно 0.');
+      return;
+    }
+
+    walletsViewState.set(chatId, {
+      ...state,
+      minBalance: value,
+      awaitingMinBalanceInput: false
+    });
+    await bot.sendMessage(chatId, `✅ Минимальная сумма установлена: > $${formatNumberWithCommas(value)}`);
+    const selectedProjects = Array.isArray(state.selectedProjects) ? state.selectedProjects : [];
+    if (selectedProjects.length > 0) {
+      await showWalletsPage(chatId, 0, null, '');
+    } else {
+      await showProjectsSelection(chatId);
+    }
+    return;
+  }
+
+  if (state.awaitingMinBalanceInput && text && text.startsWith('/')) {
+    walletsViewState.set(chatId, {
+      ...state,
+      awaitingMinBalanceInput: false
+    });
+  }
 
   // Пропускаем команды
   if (text && text.startsWith('/')) {
