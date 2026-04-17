@@ -9,6 +9,7 @@ import { connectDB } from './config/database.js';
 import { Wallet } from './models/Wallet.js';
 import { BalanceHistory } from './models/BalanceHistory.js';
 import { BotSubscriber } from './models/BotSubscriber.js';
+import { WhitelistUser } from './models/WhitelistUser.js';
 import { checkBalance, formatBalance, formatBalanceUSD, convertToUSD } from './services/balanceChecker.js';
 
 // Загрузка переменных окружения
@@ -30,6 +31,10 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 /** Команды для меню Telegram (кнопка «Меню» и подсказка при вводе «/») */
 const BOT_COMMANDS = [
   { command: 'start', description: 'Справка и список команд' },
+  { command: 'myid', description: 'Показать ваш Telegram user id' },
+  { command: 'allow', description: 'Добавить user id в whitelist' },
+  { command: 'deny', description: 'Удалить user id из whitelist' },
+  { command: 'whitelist', description: 'Показать whitelist пользователей' },
   { command: 'addwallet', description: 'Добавить кошелёк в базу' },
   { command: 'addwallets', description: 'Массовый импорт кошельков из XLSX/CSV' },
   { command: 'wallets', description: 'Кошельки с балансом больше $100' },
@@ -206,6 +211,56 @@ const toValidUserId = (value) => {
   return Number.isInteger(parsed) ? parsed : null;
 };
 
+const ensureWhitelistBootstrap = async (msg) => {
+  if (mongoose.connection.readyState !== 1) return;
+  const total = await WhitelistUser.countDocuments({ isActive: true });
+  if (total > 0) return;
+
+  const firstUserId = msg.from?.id;
+  if (!Number.isInteger(firstUserId)) return;
+
+  await WhitelistUser.updateOne(
+    { telegramUserId: firstUserId },
+    {
+      $set: {
+        telegramUserId: firstUserId,
+        username: msg.from?.username || '',
+        firstName: msg.from?.first_name || '',
+        isActive: true,
+        addedByTelegramUserId: firstUserId
+      }
+    },
+    { upsert: true }
+  );
+
+  await bot.sendMessage(
+    msg.chat.id,
+    '🔐 Whitelist был пуст — вы автоматически добавлены как первый управляющий пользователь.'
+  );
+};
+
+const isWhitelistedUser = async (telegramUserId) => {
+  if (!Number.isInteger(telegramUserId) || mongoose.connection.readyState !== 1) return false;
+  const user = await WhitelistUser.findOne({ telegramUserId, isActive: true }).lean();
+  return Boolean(user);
+};
+
+const requireWhitelistAccess = async (msg) => {
+  const telegramUserId = msg.from?.id;
+  if (!Number.isInteger(telegramUserId)) return false;
+
+  await ensureWhitelistBootstrap(msg);
+  const allowed = await isWhitelistedUser(telegramUserId);
+  if (allowed) return true;
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `⛔ Доступ запрещен.\nВаш Telegram user id: ${telegramUserId}\n` +
+    `Попросите пользователя из whitelist добавить вас командой /allow ${telegramUserId}.`
+  );
+  return false;
+};
+
 const parseWalletsCommandArgs = (rawText = '') => {
   const withoutCommand = String(rawText).replace(/^\/wallets(?:@\w+)?\s*/i, '').trim();
   if (!withoutCommand) {
@@ -233,18 +288,108 @@ const parseWalletsCommandArgs = (rawText = '') => {
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
+  await ensureWhitelistBootstrap(msg);
+  const hasAccess = await isWhitelistedUser(msg.from?.id);
 
   await bot.sendMessage(
     chatId,
     `📋 Доступные команды:\n\n` +
     `/start — справка\n` +
+    `/myid — показать мой Telegram user id\n` +
+    `/allow <user_id> — добавить пользователя в whitelist\n` +
+    `/deny <user_id> — убрать пользователя из whitelist\n` +
+    `/whitelist — показать текущий whitelist\n` +
     `/addwallet — добавить кошелёк\n` +
-    `/addwallets — массово загрузить кошельки из XLSX\n` +
+    `/addwallets — массово загрузить кошельки из XLSX/CSV\n` +
     `/wallets — кошельки с балансом > $100\n` +
     `/checkwallet — проверить один кошелёк (адрес из базы)\n` +
     `/checkbalance — проверить все кошельки\n\n` +
+    `🔐 Статус доступа: ${hasAccess ? 'разрешён' : 'ограничен'}\n` +
     `💡 Список команд также в меню чата (кнопка «Меню» или ввод «/»).`
   );
+});
+
+bot.onText(/\/myid/, async (msg) => {
+  await bot.sendMessage(msg.chat.id, `🆔 Ваш Telegram user id: ${msg.from?.id ?? 'не определен'}`);
+});
+
+bot.onText(/\/allow(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const rawId = String(match?.[1] || '').trim();
+  const targetUserId = Number.parseInt(rawId, 10);
+  if (!Number.isInteger(targetUserId)) {
+    await bot.sendMessage(chatId, '❌ Использование: /allow <telegram_user_id>');
+    return;
+  }
+
+  const existing = await WhitelistUser.findOne({ telegramUserId: targetUserId, isActive: true }).lean();
+  if (existing) {
+    await bot.sendMessage(chatId, `ℹ️ Пользователь ${targetUserId} уже в whitelist.`);
+    return;
+  }
+
+  await WhitelistUser.updateOne(
+    { telegramUserId: targetUserId },
+    {
+      $set: {
+        telegramUserId: targetUserId,
+        isActive: true,
+        addedByTelegramUserId: msg.from.id
+      }
+    },
+    { upsert: true }
+  );
+
+  await bot.sendMessage(chatId, `✅ Пользователь ${targetUserId} добавлен в whitelist.`);
+});
+
+bot.onText(/\/deny(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const rawId = String(match?.[1] || '').trim();
+  const targetUserId = Number.parseInt(rawId, 10);
+  if (!Number.isInteger(targetUserId)) {
+    await bot.sendMessage(chatId, '❌ Использование: /deny <telegram_user_id>');
+    return;
+  }
+
+  if (targetUserId === msg.from.id) {
+    await bot.sendMessage(chatId, '❌ Нельзя удалить самого себя из whitelist.');
+    return;
+  }
+
+  const result = await WhitelistUser.updateOne(
+    { telegramUserId: targetUserId, isActive: true },
+    { $set: { isActive: false } }
+  );
+  if (result.modifiedCount === 0) {
+    await bot.sendMessage(chatId, `ℹ️ Пользователь ${targetUserId} не найден в whitelist.`);
+    return;
+  }
+
+  await bot.sendMessage(chatId, `✅ Пользователь ${targetUserId} удален из whitelist.`);
+});
+
+bot.onText(/\/whitelist/, async (msg) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const users = await WhitelistUser.find({ isActive: true }).sort({ createdAt: 1 }).lean();
+  if (users.length === 0) {
+    await bot.sendMessage(chatId, '📭 Whitelist пуст.');
+    return;
+  }
+
+  const list = users
+    .map((u, idx) => `${idx + 1}. ${u.telegramUserId}${u.username ? ` (@${u.username})` : ''}${u.firstName ? ` — ${u.firstName}` : ''}`)
+    .join('\n');
+  await bot.sendMessage(chatId, `👥 Whitelist (${users.length}):\n${list}`);
 });
 
 // Обработка команды /addwallet - добавление кошелька
@@ -252,6 +397,7 @@ bot.onText(/\/addwallet/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
 
   if (mongoose.connection.readyState !== 1) {
     await bot.sendMessage(chatId, '⚠️ База данных недоступна. Проверьте подключение к MongoDB.');
@@ -353,6 +499,7 @@ bot.onText(/\/addwallet/, async (msg) => {
 bot.onText(/\/addwallets/, async (msg) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
 
   await bot.sendMessage(
     chatId,
@@ -692,6 +839,7 @@ const showProjectsSelection = async (chatId, messageId = null) => {
 bot.onText(/\/wallets(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
   const rawText = String(msg.text || '');
   const parsedArgs = parseWalletsCommandArgs(rawText);
   const projectFilter = parsedArgs.projectFilter || String(match?.[1] || '').trim();
@@ -724,6 +872,11 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   const data = query.data;
+  const pseudoMsg = { chat: query.message.chat, from: query.from };
+  if (!(await requireWhitelistAccess(pseudoMsg))) {
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: '⛔ Нет доступа.' });
+    return;
+  }
 
   if (data && data.startsWith('wallets_page_')) {
     const page = parseInt(data.replace('wallets_page_', ''), 10);
@@ -931,6 +1084,7 @@ const checkAllWalletsBalance = async () => {
 bot.onText(/\/checkwallet(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
 
   try {
     if (mongoose.connection.readyState !== 1) {
@@ -1000,6 +1154,7 @@ bot.onText(/\/checkwallet(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
 bot.onText(/\/checkbalance/, async (msg) => {
   const chatId = msg.chat.id;
   await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
 
   try {
     if (mongoose.connection.readyState !== 1) {
@@ -1171,6 +1326,8 @@ bot.on('message', async (msg) => {
   if (!msg.document) {
     return;
   }
+
+  if (!(await requireWhitelistAccess(msg))) return;
 
   const fileName = msg.document.file_name || '';
   const lowerFileName = fileName.toLowerCase();
