@@ -253,7 +253,17 @@ bot.onText(/\/addwallet/, async (msg) => {
     if (responseMsg.text && responseMsg.text.startsWith('/')) return;
 
     try {
-      const lines = responseMsg.text.split('\n').map(line => line.trim()).filter(line => line);
+      const rawText = typeof responseMsg.text === 'string' ? responseMsg.text : '';
+      if (!rawText) {
+        await bot.sendMessage(
+          chatId,
+          '❌ Ожидался текст с 4 строками (проект, User ID, алиас, адрес).\n' +
+          'Пожалуйста, запустите /addwallet и отправьте данные текстом.'
+        );
+        return;
+      }
+
+      const lines = rawText.split('\n').map(line => line.trim()).filter(line => line);
       
       if (lines.length < 4) {
         await bot.sendMessage(chatId, '❌ Недостаточно данных. Нужно 4 строки: проект, User ID, алиас, адрес.');
