@@ -322,6 +322,11 @@ const parseWalletsCommandArgs = (rawText = '') => {
   return { projectFilter: parts.join(' ').trim(), minBalance: null, walletTypeFilter };
 };
 
+const CLASSIFY_PROGRESS_STEP = Math.max(
+  1,
+  Number.parseInt(process.env.CLASSIFY_PROGRESS_STEP || '500', 10) || 500
+);
+
 // Обработка команды /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -481,9 +486,12 @@ bot.onText(/\/classifyall(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   let classified = 0;
   let skippedManual = 0;
   let errors = 0;
+  let processed = 0;
+  const total = wallets.length;
   await bot.sendMessage(
     chatId,
     `⏳ Запускаю классификацию ${wallets.length} кошельков...` +
+    `\n📍 Прогресс будет каждые ${CLASSIFY_PROGRESS_STEP} шт.` +
     (forceManual ? '\n⚠️ Режим force: manual метки будут перезаписаны.' : '')
   );
 
@@ -498,6 +506,20 @@ bot.onText(/\/classifyall(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
     } catch (error) {
       errors++;
     }
+    processed++;
+
+    if (processed % CLASSIFY_PROGRESS_STEP === 0 || processed === total) {
+      const progressText =
+        `⏳ classifyall: ${processed}/${total}\n` +
+        `🧠 Классифицировано: ${classified}\n` +
+        `⏭️ Пропущено manual: ${skippedManual}\n` +
+        `❌ Ошибок: ${errors}`;
+      console.log(
+        `[classifyall] progress ${processed}/${total} | classified=${classified} | skippedManual=${skippedManual} | errors=${errors}`
+      );
+      await bot.sendMessage(chatId, progressText);
+    }
+
     await new Promise((r) => setTimeout(r, 250));
   }
 
