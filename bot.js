@@ -11,6 +11,7 @@ import { BalanceHistory } from './models/BalanceHistory.js';
 import { BotSubscriber } from './models/BotSubscriber.js';
 import { WhitelistUser } from './models/WhitelistUser.js';
 import { checkBalance, formatBalance, formatBalanceUSD, convertToUSD } from './services/balanceChecker.js';
+import { classifyWalletByRules } from './services/walletClassifier.js';
 
 // Загрузка переменных окружения
 // В ESM `dotenv.config()` без path берет .env из process.cwd().
@@ -35,6 +36,9 @@ const BOT_COMMANDS = [
   { command: 'allow', description: 'Добавить user id в whitelist' },
   { command: 'deny', description: 'Удалить user id из whitelist' },
   { command: 'whitelist', description: 'Показать whitelist пользователей' },
+  { command: 'classify', description: 'Классифицировать кошелек' },
+  { command: 'classifyall', description: 'Классифицировать все кошельки' },
+  { command: 'setlabel', description: 'Ручная метка кошелька' },
   { command: 'addwallet', description: 'Добавить кошелёк в базу' },
   { command: 'addwallets', description: 'Массовый импорт кошельков из XLSX/CSV' },
   { command: 'wallets', description: 'Кошельки с балансом больше $100' },
@@ -261,15 +265,48 @@ const requireWhitelistAccess = async (msg) => {
   return false;
 };
 
+const applyRulesClassification = async (wallet, options = {}) => {
+  const result = await classifyWalletByRules(wallet.wallet_destination);
+  const nextTypeSource = options.typeSource || 'rules';
+
+  await Wallet.updateOne(
+    { _id: wallet._id },
+    {
+      $set: {
+        wallet_type: result.walletType,
+        type_score: result.score,
+        type_confidence: result.confidence,
+        type_reasons: result.reasons,
+        type_source: nextTypeSource,
+        type_updated_at: new Date()
+      }
+    }
+  );
+
+  return result;
+};
+
 const parseWalletsCommandArgs = (rawText = '') => {
   const withoutCommand = String(rawText).replace(/^\/wallets(?:@\w+)?\s*/i, '').trim();
   if (!withoutCommand) {
-    return { projectFilter: '', minBalance: null };
+    return { projectFilter: '', minBalance: null, walletTypeFilter: '' };
   }
 
-  const parts = withoutCommand.split(/\s+/).filter(Boolean);
+  let parts = withoutCommand.split(/\s+/).filter(Boolean);
   if (parts.length === 0) {
-    return { projectFilter: '', minBalance: null };
+    return { projectFilter: '', minBalance: null, walletTypeFilter: '' };
+  }
+
+  let walletTypeFilter = '';
+  parts = parts.filter((part) => {
+    const match = part.match(/^(?:type|status):(personal|service|unknown|suspicious)$/i);
+    if (!match) return true;
+    walletTypeFilter = match[1].toLowerCase();
+    return false;
+  });
+
+  if (parts.length === 0) {
+    return { projectFilter: '', minBalance: null, walletTypeFilter };
   }
 
   const lastPart = parts[parts.length - 1].replace(',', '.');
@@ -277,11 +314,12 @@ const parseWalletsCommandArgs = (rawText = '') => {
   if (Number.isFinite(lastAsNumber) && lastAsNumber >= 0) {
     return {
       projectFilter: parts.slice(0, -1).join(' ').trim(),
-      minBalance: lastAsNumber
+      minBalance: lastAsNumber,
+      walletTypeFilter
     };
   }
 
-  return { projectFilter: withoutCommand, minBalance: null };
+  return { projectFilter: parts.join(' ').trim(), minBalance: null, walletTypeFilter };
 };
 
 // Обработка команды /start
@@ -299,6 +337,9 @@ bot.onText(/\/start/, async (msg) => {
     `/allow <user_id> — добавить пользователя в whitelist\n` +
     `/deny <user_id> — убрать пользователя из whitelist\n` +
     `/whitelist — показать текущий whitelist\n` +
+    `/classify <адрес> — классифицировать кошелек\n` +
+    `/classifyall — пакетная классификация (кроме manual)\n` +
+    `/setlabel <адрес> <тип> — ручная метка (personal/service/unknown/suspicious)\n` +
     `/addwallet — добавить кошелёк\n` +
     `/addwallets — массово загрузить кошельки из XLSX/CSV\n` +
     `/wallets — кошельки с балансом > $100\n` +
@@ -390,6 +431,124 @@ bot.onText(/\/whitelist/, async (msg) => {
     .map((u, idx) => `${idx + 1}. ${u.telegramUserId}${u.username ? ` (@${u.username})` : ''}${u.firstName ? ` — ${u.firstName}` : ''}`)
     .join('\n');
   await bot.sendMessage(chatId, `👥 Whitelist (${users.length}):\n${list}`);
+});
+
+bot.onText(/\/classify(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const walletAddress = String(match?.[1] || '').trim();
+  if (!walletAddress) {
+    await bot.sendMessage(chatId, '❌ Использование: /classify <адрес_кошелька>');
+    return;
+  }
+
+  const wallet = await Wallet.findOne({ wallet_destination: walletAddress });
+  if (!wallet) {
+    await bot.sendMessage(chatId, '❌ Кошелек не найден в базе.');
+    return;
+  }
+
+  await bot.sendMessage(chatId, `⏳ Классифицирую кошелек ${walletAddress}...`);
+  const result = await applyRulesClassification(wallet, { typeSource: 'rules' });
+  const reasonsText = result.reasons.length > 0
+    ? `\nПричины:\n- ${result.reasons.slice(0, 5).join('\n- ')}`
+    : '';
+
+  await bot.sendMessage(
+    chatId,
+    `✅ Классификация завершена\n` +
+    `💼 Адрес: ${walletAddress}\n` +
+    `🏷️ Тип: ${result.walletType}\n` +
+    `📊 Score: ${result.score}/100\n` +
+    `🔐 Confidence: ${result.confidence}%${reasonsText}`
+  );
+});
+
+bot.onText(/\/classifyall(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const forceManual = String(match?.[1] || '').toLowerCase().includes('force');
+  const wallets = await Wallet.find().sort({ createdAt: -1 });
+  if (wallets.length === 0) {
+    await bot.sendMessage(chatId, '📭 В базе нет кошельков для классификации.');
+    return;
+  }
+
+  let classified = 0;
+  let skippedManual = 0;
+  let errors = 0;
+  await bot.sendMessage(
+    chatId,
+    `⏳ Запускаю классификацию ${wallets.length} кошельков...` +
+    (forceManual ? '\n⚠️ Режим force: manual метки будут перезаписаны.' : '')
+  );
+
+  for (const wallet of wallets) {
+    try {
+      if (!forceManual && wallet.type_source === 'manual') {
+        skippedManual++;
+        continue;
+      }
+      await applyRulesClassification(wallet, { typeSource: 'rules' });
+      classified++;
+    } catch (error) {
+      errors++;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  await bot.sendMessage(
+    chatId,
+    `✅ classifyall завершен\n` +
+    `📊 Всего: ${wallets.length}\n` +
+    `🧠 Классифицировано: ${classified}\n` +
+    `⏭️ Пропущено manual: ${skippedManual}\n` +
+    `❌ Ошибок: ${errors}`
+  );
+});
+
+bot.onText(/\/setlabel(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  await registerBotSubscriber(msg);
+  if (!(await requireWhitelistAccess(msg))) return;
+
+  const rawArgs = String(match?.[1] || '').trim();
+  const [walletAddress, labelRaw] = rawArgs.split(/\s+/);
+  const label = String(labelRaw || '').toLowerCase();
+  const allowed = new Set(['personal', 'service', 'unknown', 'suspicious']);
+
+  if (!walletAddress || !allowed.has(label)) {
+    await bot.sendMessage(
+      chatId,
+      '❌ Использование: /setlabel <адрес> <тип>\n' +
+      'Тип: personal | service | unknown | suspicious'
+    );
+    return;
+  }
+
+  const wallet = await Wallet.findOne({ wallet_destination: walletAddress });
+  if (!wallet) {
+    await bot.sendMessage(chatId, '❌ Кошелек не найден в базе.');
+    return;
+  }
+
+  await Wallet.updateOne(
+    { _id: wallet._id },
+    {
+      $set: {
+        wallet_type: label,
+        type_source: 'manual',
+        type_updated_at: new Date(),
+        type_reasons: [`Manual label by ${msg.from.id}`]
+      }
+    }
+  );
+
+  await bot.sendMessage(chatId, `✅ Метка обновлена: ${walletAddress} → ${label} (manual).`);
 });
 
 // Обработка команды /addwallet - добавление кошелька
@@ -528,12 +687,17 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
       ? currentState.selectedProjects
       : [];
     const minBalance = Number.isFinite(currentState.minBalance) ? currentState.minBalance : 100;
+    const walletTypeFilter = String(currentState.walletTypeFilter || '').trim().toLowerCase();
 
-    const filterQuery = selectedProjects.length > 0
-      ? { project: { $in: selectedProjects } }
-      : (normalizedFilter
-          ? { project: { $regex: normalizedFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
-          : {});
+    const filterQuery = {};
+    if (selectedProjects.length > 0) {
+      filterQuery.project = { $in: selectedProjects };
+    } else if (normalizedFilter) {
+      filterQuery.project = { $regex: normalizedFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+    }
+    if (['personal', 'service', 'unknown', 'suspicious'].includes(walletTypeFilter)) {
+      filterQuery.wallet_type = walletTypeFilter;
+    }
 
     const allWallets = await Wallet.find(filterQuery).sort({ createdAt: -1 });
 
@@ -642,6 +806,9 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
       message += `🔎 Выбраны проекты: ${selectedProjects.join(', ')}\n`;
     } else if (normalizedFilter) {
       message += `🔎 Фильтр по проекту: ${normalizedFilter}\n`;
+    }
+    if (walletTypeFilter) {
+      message += `🏷️ Фильтр по типу: ${walletTypeFilter}\n`;
     }
     message += `📄 Страница ${currentPage + 1} из ${totalPages}\n\n`;
     
@@ -809,6 +976,7 @@ const showProjectsSelection = async (chatId, messageId = null) => {
     ? currentState.selectedProjects.filter((p) => allProjects.includes(p))
     : [];
   const minBalance = Number.isFinite(currentState.minBalance) ? currentState.minBalance : 100;
+  const walletTypeFilter = String(currentState.walletTypeFilter || '').trim().toLowerCase();
 
   walletsViewState.set(chatId, {
     ...currentState,
@@ -820,8 +988,10 @@ const showProjectsSelection = async (chatId, messageId = null) => {
   const text =
     `📁 Выберите проекты для вывода /wallets\n\n` +
     `Текущий порог: > $${formatNumberWithCommas(minBalance)}\n` +
+    `Текущий тип: ${walletTypeFilter || 'все'}\n` +
     `Отметьте один или несколько проектов, затем нажмите "Показать отмеченные".\n` +
-    `После этого бот попросит ввести сумму.`;
+    `После этого бот попросит ввести сумму.\n\n` +
+    `💡 Фильтр по типу: /wallets status:service или /wallets status:personal`;
   const reply_markup = buildProjectsKeyboard(allProjects, selectedProjects);
 
   if (messageId) {
@@ -843,16 +1013,18 @@ bot.onText(/\/wallets(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
   const rawText = String(msg.text || '');
   const parsedArgs = parseWalletsCommandArgs(rawText);
   const projectFilter = parsedArgs.projectFilter || String(match?.[1] || '').trim();
+  const walletTypeFilter = parsedArgs.walletTypeFilter || '';
   const state = walletsViewState.get(chatId) || {};
   const minBalance = Number.isFinite(parsedArgs.minBalance)
     ? parsedArgs.minBalance
     : (Number.isFinite(state.minBalance) ? state.minBalance : 100);
 
-  if (!projectFilter) {
+  if (!projectFilter && !walletTypeFilter) {
     walletsViewState.set(chatId, {
       ...state,
       projectFilter: '',
-      minBalance
+      minBalance,
+      walletTypeFilter: ''
     });
     await showProjectsSelection(chatId);
     return;
@@ -860,6 +1032,7 @@ bot.onText(/\/wallets(?:@\w+)?(?:\s+(.+))?/, async (msg, match) => {
 
   walletsViewState.set(chatId, {
     projectFilter,
+    walletTypeFilter,
     minBalance,
     selectedProjects: [],
     availableProjects: []

@@ -38,6 +38,33 @@ const walletSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  wallet_type: {
+    type: String,
+    enum: ['personal', 'service', 'unknown', 'suspicious'],
+    default: 'unknown',
+    index: true
+  },
+  type_score: {
+    type: Number,
+    default: 50
+  },
+  type_confidence: {
+    type: Number,
+    default: 0
+  },
+  type_reasons: {
+    type: [String],
+    default: []
+  },
+  type_source: {
+    type: String,
+    enum: ['rules', 'manual'],
+    default: 'rules'
+  },
+  type_updated_at: {
+    type: Date,
+    default: null
+  },
   lastBalanceCheck: {
     type: Date,
     default: null
