@@ -109,10 +109,16 @@ export const classifyWalletByRules = async (walletAddress) => {
   if (txCount24h > 200) {
     score += 20;
     reasons.push(`Высокая активность за 24ч: ${txCount24h} транзакций`);
+  } else if (txCount24h > 80) {
+    score += 10;
+    reasons.push(`Умеренно высокая активность за 24ч: ${txCount24h} транзакций`);
   }
   if (uniqueCounterparties > 80) {
     score += 20;
     reasons.push(`Много контрагентов: ${uniqueCounterparties}`);
+  } else if (uniqueCounterparties > 30) {
+    score += 10;
+    reasons.push(`Умеренно много контрагентов: ${uniqueCounterparties}`);
   }
   if (smallTxRatio > 0.7) {
     score += 10;
@@ -130,17 +136,24 @@ export const classifyWalletByRules = async (walletAddress) => {
   if (txCountSample < 20) {
     score -= 15;
     reasons.push(`Мало транзакций в выборке: ${txCountSample}`);
+  } else if (txCountSample < 50) {
+    score -= 8;
+    reasons.push(`Невысокая активность в выборке: ${txCountSample}`);
   }
   if (uniqueCounterparties < 10) {
     score -= 20;
     reasons.push(`Мало контрагентов: ${uniqueCounterparties}`);
+  } else if (uniqueCounterparties < 20) {
+    score -= 8;
+    reasons.push(`Ограниченный круг контрагентов: ${uniqueCounterparties}`);
   }
 
   score = Math.max(0, Math.min(100, score));
 
   let walletType = 'unknown';
-  if (score >= 70) walletType = 'service';
-  else if (score <= 30) walletType = 'personal';
+  // Делаем классификацию еще менее консервативной (еще меньше unknown)
+  if (score >= 55) walletType = 'service';
+  else if (score <= 45) walletType = 'personal';
 
   if (txCount24h > 500 && uniqueCounterparties > 150 && smallTxRatio > 0.8) {
     walletType = 'suspicious';
