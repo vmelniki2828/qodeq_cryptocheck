@@ -98,6 +98,7 @@ export const classifyWalletByRules = async (walletAddress) => {
   const uniqueCounterparties = counterparties.size;
   const smallTxRatio = txCountSample > 0 ? smallTxCount / txCountSample : 0;
   const contractInteractionRatio = txCountSample > 0 ? contractInteractions / txCountSample : 0;
+  const counterpartyPerTx = txCountSample > 0 ? uniqueCounterparties / txCountSample : 0;
 
   let activeHoursSpan = 0;
   if (timestamps.length > 1) {
@@ -106,54 +107,83 @@ export const classifyWalletByRules = async (walletAddress) => {
     activeHoursSpan = (maxTs - minTs) / (60 * 60 * 1000);
   }
 
-  if (txCount24h > 200) {
-    score += 20;
-    reasons.push(`Высокая активность за 24ч: ${txCount24h} транзакций`);
-  } else if (txCount24h > 80) {
-    score += 10;
-    reasons.push(`Умеренно высокая активность за 24ч: ${txCount24h} транзакций`);
-  }
-  if (uniqueCounterparties > 80) {
-    score += 20;
-    reasons.push(`Много контрагентов: ${uniqueCounterparties}`);
-  } else if (uniqueCounterparties > 30) {
-    score += 10;
-    reasons.push(`Умеренно много контрагентов: ${uniqueCounterparties}`);
-  }
-  if (smallTxRatio > 0.7) {
-    score += 10;
-    reasons.push(`Высокая доля мелких транзакций: ${(smallTxRatio * 100).toFixed(1)}%`);
-  }
-  if (activeHoursSpan > 18) {
-    score += 10;
-    reasons.push(`Почти круглосуточная активность: ${activeHoursSpan.toFixed(1)}ч`);
-  }
-  if (contractInteractionRatio > 0.6) {
-    score += 10;
-    reasons.push(`Высокая доля контрактных операций: ${(contractInteractionRatio * 100).toFixed(1)}%`);
+  const activeDaysSet = new Set(
+    timestamps.map((ts) => {
+      const d = new Date(ts);
+      return `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+    })
+  );
+  const activeDays = activeDaysSet.size;
+  const txPerActiveDay = activeDays > 0 ? txCountSample / activeDays : 0;
+
+  // Веса для более устойчивой классификации:
+  // 1) уникальные контрагенты и 2) плотность операций в день — самые важные.
+  let serviceScore = 0;
+  let personalScore = 0;
+
+  // --- Важный параметр №1: уникальные контрагенты ---
+  if (uniqueCounterparties >= 120) {
+    serviceScore += 30;
+    reasons.push(`Ключевой сигнал service: очень много контрагентов (${uniqueCounterparties})`);
+  } else if (uniqueCounterparties >= 60) {
+    serviceScore += 20;
+    reasons.push(`Ключевой сигнал service: много контрагентов (${uniqueCounterparties})`);
+  } else if (uniqueCounterparties <= 8) {
+    personalScore += 25;
+    reasons.push(`Ключевой сигнал personal: узкий круг контрагентов (${uniqueCounterparties})`);
+  } else if (uniqueCounterparties <= 20) {
+    personalScore += 12;
+    reasons.push(`Сигнал personal: ограниченный круг контрагентов (${uniqueCounterparties})`);
   }
 
-  if (txCountSample < 20) {
-    score -= 15;
-    reasons.push(`Мало транзакций в выборке: ${txCountSample}`);
-  } else if (txCountSample < 50) {
-    score -= 8;
-    reasons.push(`Невысокая активность в выборке: ${txCountSample}`);
+  // --- Важный параметр №2: интенсивность операций ---
+  if (txPerActiveDay >= 80) {
+    serviceScore += 25;
+    reasons.push(`Ключевой сигнал service: высокая плотность операций (${txPerActiveDay.toFixed(1)}/день)`);
+  } else if (txPerActiveDay >= 30) {
+    serviceScore += 15;
+    reasons.push(`Сигнал service: умеренно высокая плотность операций (${txPerActiveDay.toFixed(1)}/день)`);
+  } else if (txPerActiveDay <= 4) {
+    personalScore += 18;
+    reasons.push(`Ключевой сигнал personal: низкая плотность операций (${txPerActiveDay.toFixed(1)}/день)`);
   }
-  if (uniqueCounterparties < 10) {
-    score -= 20;
-    reasons.push(`Мало контрагентов: ${uniqueCounterparties}`);
-  } else if (uniqueCounterparties < 20) {
-    score -= 8;
-    reasons.push(`Ограниченный круг контрагентов: ${uniqueCounterparties}`);
+
+  // Доп. сильный индикатор burst-нагрузки
+  if (txCount24h >= 250) {
+    serviceScore += 20;
+    reasons.push(`Высокая активность за 24ч: ${txCount24h}`);
+  } else if (txCount24h <= 5) {
+    personalScore += 10;
+    reasons.push(`Низкая активность за 24ч: ${txCount24h}`);
   }
+
+  // Средние сигналы
+  if (contractInteractionRatio >= 0.5) {
+    serviceScore += 8;
+    reasons.push(`Высокая доля контрактных операций: ${(contractInteractionRatio * 100).toFixed(1)}%`);
+  }
+  if (smallTxRatio >= 0.75) {
+    serviceScore += 7;
+    reasons.push(`Высокая доля мелких транзакций: ${(smallTxRatio * 100).toFixed(1)}%`);
+  }
+  if (counterpartyPerTx <= 0.08 && txCountSample >= 30) {
+    personalScore += 8;
+    reasons.push(`Низкое разнообразие контрагентов на операцию (${counterpartyPerTx.toFixed(3)})`);
+  }
+
+  // Мало данных => не форсим тип
+  if (txCountSample < 25 || activeDays < 2) {
+    personalScore += 6;
+    reasons.push(`Ограниченная выборка для уверенной классификации (tx=${txCountSample}, days=${activeDays})`);
+  }
+
+  score = 50 + serviceScore - personalScore;
 
   score = Math.max(0, Math.min(100, score));
 
   let walletType = 'unknown';
-  // Делаем классификацию еще менее консервативной (еще меньше unknown)
-  if (score >= 55) walletType = 'service';
-  else if (score <= 45) walletType = 'personal';
+  if (score >= 58) walletType = 'service';
+  else if (score <= 42) walletType = 'personal';
 
   if (txCount24h > 500 && uniqueCounterparties > 150 && smallTxRatio > 0.8) {
     walletType = 'suspicious';
@@ -171,6 +201,9 @@ export const classifyWalletByRules = async (walletAddress) => {
       txCountSample,
       txCount24h,
       uniqueCounterparties,
+      activeDays,
+      txPerActiveDay: Number(txPerActiveDay.toFixed(2)),
+      counterpartyPerTx: Number(counterpartyPerTx.toFixed(4)),
       smallTxRatio: Number(smallTxRatio.toFixed(4)),
       activeHoursSpan: Number(activeHoursSpan.toFixed(2)),
       contractInteractionRatio: Number(contractInteractionRatio.toFixed(4))
