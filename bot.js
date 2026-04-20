@@ -879,11 +879,16 @@ const showWalletsPage = async (chatId, page = 0, messageId = null, projectFilter
       } else {
         balanceStr = `💰 Баланс: не проверен\n`;
       }
+
+      const walletType = wallet.wallet_type || 'unknown';
+      const walletScore = Number.isFinite(wallet.type_score) ? wallet.type_score : 50;
+      const walletConfidence = Number.isFinite(wallet.type_confidence) ? wallet.type_confidence : 0;
       
       message += `${globalIndex + 1}. 📁 Проект: ${wallet.project}\n`;
       message += `   👤 User ID: ${wallet.user_id}\n`;
       message += `   📝 Алиас: ${wallet.alias || 'не указан'}\n`;
       message += `   💼 Адрес: ${wallet.wallet_destination}\n`;
+      message += `   🏷️ Классификация: ${walletType} (score: ${walletScore}, confidence: ${walletConfidence}%)\n`;
       message += `   ${balanceStr}`;
       if (changeStr) {
         message += `   ${changeStr}`;
